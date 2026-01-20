@@ -105,7 +105,7 @@ system_prompt = f"""
 규칙:
 - 입력된 days 만큼 day1, day2, ... 생성
 - 여행 시작 일자 : {start_date}, 여행 종료 일자 : {end_date}
-- 매일 관광지 4곳 + 식당 2곳 총 6곳 방문
+- 매일 관광지 4~6곳 + 식당 2곳 구성
 - route에는 places 목록에서만 선택
 - restaurants에는 restaurants 목록에서만 선택
 - route는 이동 동선을 고려하여 방문 순서 최적화
