@@ -4,6 +4,9 @@ import pandas as pd
 import random
 import time
 import math
+from datetime import datetime, timedelta
+from dotenv import load_dotenv
+import os
 
 # areas = ["종로구", "강남구", "마포구", "성수동", "홍대", "이태원", "잠실"]
 # categories = ["관광지", "카페", "식당", "박물관", "공원", "시장"]
@@ -55,10 +58,11 @@ import math
 # df.to_excel("places_3000.xlsx", index=False)
 
 # =================================================================
-# API 검사
+# API 테스트
 # =================================================================
 
-API = "AIzaSyAMIVVK4j23q2tO9DVdpt_TI2KP1Q2lF5I"
+load_dotenv()
+API = os.getenv("API_KEY")
 
 genai.configure(api_key=API)
 model = genai.GenerativeModel("gemini-2.5-flash-lite")
@@ -70,33 +74,51 @@ filtered_restaurant = df[(df["area"] == "종로구") & (df["category"] == "식�
 places = filtered_spot.to_dict(orient="records")
 restaurants = filtered_restaurant.to_dict(orient="records")
 
-system_prompt = """
+start_date = "2026-01-21"
+end_date = "2026-01-22"
+start = datetime.strptime(start_date, "%Y-%m-%d")
+end = datetime.strptime(end_date, "%Y-%m-%d")
+days = (end - start).days + 1
+print(f"총 일수 : {days}")
+
+system_prompt = f"""
 너는 서울 여행 경로 생성기다.
 
 반드시 아래 JSON 스키마 형식으로만 출력한다.
-
 {
   "plans": {
-    "day1": [
-      {"name": "...", "category": "...", "lat": 0.0, "lng": 0.0}
-    ],
-    "day2": [
-      {"name": "...", "category": "...", "lat": 0.0, "lng": 0.0}
-    ]
+    "day1": {
+      "route": [
+        {"name": "...", "category": "...", "lat": 0.0, "lng": 0.0}
+      ],
+      "restaurants": [
+        {"name": "...", "category": "식당", "lat": 0.0, "lng": 0.0}
+      ]
+    },
+    "day2": {
+      "route": [],
+      "restaurants": []
+    }
   }
 }
 
 규칙:
 - 입력된 days 만큼 day1, day2, ... 생성
-- places 목록에서만 장소를 선택
-- 이동 동선을 고려하여 방문 순서 최적화
-- 반드시 JSON만 출력
+- 여행 시작 일자 : {start_date}, 여행 종료 일자 : {end_date}
+- 매일 관광지 4곳 + 식당 2곳 총 6곳 방문
+- route에는 places 목록에서만 선택
+- restaurants에는 restaurants 목록에서만 선택
+- route는 이동 동선을 고려하여 방문 순서 최적화
+- restaurants는 해당 day의 마지막 관광지와 가까운 순서로 2곳 선택
+- 설명 문장은 출력하지 않는다
+- 반드시 JSON만 출력한다
 """
 
 user_prompt = {
     "days": 2,
     "start_location": {"lat": 37.5547, "lng": 126.9706},
-    "places": places[:30]
+    "places": places[:6*days*3],
+    "restraurants": restaurants[:3*days*3],
 }
 
 prompt = system_prompt + "\n\n" + json.dumps(user_prompt, ensure_ascii=False)
@@ -107,30 +129,6 @@ elapsed = time.time() - start_time
 
 print("⏱ Gemini 응답 시간:", round(elapsed, 3), "초")
 print("\n====== Gemini 응답 ======\n")
-print(response.text)
-
-# 거리 계산
-def haversine(lat1, lon1, lat2, lon2):
-    R = 6371  # km
-    phi1 = math.radians(lat1)
-    phi2 = math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-
-    a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
-    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1-a))
-
-# 주변 음식점 찾기
-def find_near_restaurants(place, restaurants, k=2):
-    lat, lng = place["lat"], place["lng"]
-    dists = []
-
-    for r in restaurants:
-        d = haversine(lat, lng, r["lat"], r["lng"])
-        dists.append((d, r))
-
-    dists.sort(key=lambda x: x[0])
-    return [r for _, r in dists[:k]]
 
 # JSON 추출
 def extract_json(text):
@@ -153,42 +151,66 @@ def extract_json(text):
     return json.loads(text[start:end])
 
 result = extract_json(response.text)
+print(json.dumps(result, ensure_ascii=False, indent=2))
 
-# 반드시 plans 구조로 접근
-if "plans" not in result:
-    raise ValueError("Gemini JSON에 plans 필드가 없습니다.")
+# # 거리 계산
+# def haversine(lat1, lon1, lat2, lon2):
+#     R = 6371  # km
+#     phi1 = math.radians(lat1)
+#     phi2 = math.radians(lat2)
+#     dphi = math.radians(lat2 - lat1)
+#     dlambda = math.radians(lon2 - lon1)
 
-plans = result["plans"]
+#     a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
+#     return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1-a))
 
-final_result = {}
+# # 주변 음식점 찾기
+# def find_near_restaurants(place, restaurants, k=2):
+#     lat, lng = place["lat"], place["lng"]
+#     dists = []
 
-for day_key, day_places in plans.items():
+#     for r in restaurants:
+#         d = haversine(lat, lng, r["lat"], r["lng"])
+#         dists.append((d, r))
 
-    # 방어 코드
-    if not isinstance(day_places, list):
-        print(f"⚠ {day_key} 구조가 리스트가 아닙니다. 건너뜁니다.")
-        continue
+#     dists.sort(key=lambda x: x[0])
+#     return [r for _, r in dists[:k]]
 
-    day_restaurants = []
+# # 반드시 plans 구조로 접근
+# if "plans" not in result:
+#     raise ValueError("Gemini JSON에 plans 필드가 없습니다.")
 
-    for place in day_places:
-        if "lat" not in place or "lng" not in place:
-            continue
+# plans = result["plans"]
 
-        near = find_near_restaurants(place, restaurants)
-        day_restaurants.extend(near)
+# final_result = {}
 
-    # 중복 제거 + 하루 2곳
-    unique = {r["name"]: r for r in day_restaurants}.values()
-    day_restaurants = list(unique)[:2]
+# for day_key, day_places in plans.items():
 
-    final_result[day_key] = {
-        "route": day_places,
-        "restaurants": day_restaurants
-    }
+#     # 방어 코드
+#     if not isinstance(day_places, list):
+#         print(f"⚠ {day_key} 구조가 리스트가 아닙니다. 건너뜁니다.")
+#         continue
 
-print("\n====== 최종 결과 ======\n")
-print(json.dumps(final_result, ensure_ascii=False, indent=2))
+#     day_restaurants = []
+
+#     for place in day_places:
+#         if "lat" not in place or "lng" not in place:
+#             continue
+
+#         near = find_near_restaurants(place, restaurants)
+#         day_restaurants.extend(near)
+
+#     # 중복 제거 + 하루 2곳
+#     unique = {r["name"]: r for r in day_restaurants}.values()
+#     day_restaurants = list(unique)[:2]
+
+#     final_result[day_key] = {
+#         "route": day_places,
+#         "restaurants": day_restaurants
+#     }
+
+# print("\n====== 최종 결과 ======\n")
+# print(json.dumps(final_result, ensure_ascii=False, indent=2))
 
 ## 교통 혼잡도 모델 (BPR 함수)
 # T = T0 × (1 + α × (V/C)^β)
