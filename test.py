@@ -75,16 +75,14 @@ places = filtered_spot.to_dict(orient="records")
 restaurants = filtered_restaurant.to_dict(orient="records")
 
 start_date = "2026-01-21"
-end_date = "2026-01-22"
+end_date = "2026-01-28"
 start = datetime.strptime(start_date, "%Y-%m-%d")
 end = datetime.strptime(end_date, "%Y-%m-%d")
 days = (end - start).days + 1
 print(f"총 일수 : {days}")
 
-system_prompt = f"""
-너는 서울 여행 경로 생성기다.
 
-반드시 아래 JSON 스키마 형식으로만 출력한다.
+schema = """
 {
   "plans": {
     "day1": {
@@ -101,6 +99,13 @@ system_prompt = f"""
     }
   }
 }
+"""
+system_prompt = f"""
+너는 서울 여행 경로 생성기다.
+
+반드시 아래 JSON 스키마 형식으로만 출력한다.
+
+{schema}
 
 규칙:
 - 입력된 days 만큼 day1, day2, ... 생성
@@ -115,7 +120,7 @@ system_prompt = f"""
 """
 
 user_prompt = {
-    "days": 2,
+    "days": days,
     "start_location": {"lat": 37.5547, "lng": 126.9706},
     "places": places[:6*days*3],
     "restraurants": restaurants[:3*days*3],
