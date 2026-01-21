@@ -8,55 +8,6 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import os
 
-# areas = ["종로구", "강남구", "마포구", "성수동", "홍대", "이태원", "잠실"]
-# categories = ["관광지", "카페", "식당", "박물관", "공원", "시장"]
-# mood_pool = ["감성", "조용한", "데이트", "힐링", "혼자", "활동적", "야경", "가족"]
-
-# stay_time_map = {
-#     "관광지": 90,
-#     "카페": 50,
-#     "식당": 70,
-#     "박물관": 120,
-#     "공원": 60,
-#     "시장": 80
-# }
-
-# def random_place_name(category, area):
-#     suffix = {
-#         "관광지": ["명소", "전망대", "거리", "마을"],
-#         "카페": ["감성카페", "뷰카페", "로스터리", "브런치"],
-#         "식당": ["맛집", "식당", "국밥집", "파스타집"],
-#         "박물관": ["박물관", "전시관"],
-#         "공원": ["공원", "산책로"],
-#         "시장": ["시장", "야시장"]
-#     }
-#     return f"{area} {random.choice(suffix[category])}"
-
-# rows = []
-
-# for i in range(1, 3001):
-#     category = random.choice(categories)
-#     area = random.choice(areas)
-#     moods = random.sample(mood_pool, k=random.randint(2, 4))
-
-#     row = {
-#         "place_id": f"P{i:04d}",
-#         "name": random_place_name(category, area),
-#         "category": category,
-#         "lat": round(37.4 + random.random() * 0.3, 6),
-#         "lng": round(126.8 + random.random() * 0.4, 6),
-#         "avg_stay_min": stay_time_map[category],
-#         "mood_tags": ", ".join(moods),
-#         "crowd_level": round(random.uniform(0.1, 0.9), 2),
-#         "area": area
-#     }
-
-#     rows.append(row)
-
-# df = pd.DataFrame(rows)
-
-# df.to_excel("places_3000.xlsx", index=False)
-
 # =================================================================
 # API 테스트
 # =================================================================
@@ -68,14 +19,18 @@ genai.configure(api_key=API)
 model = genai.GenerativeModel("gemini-2.5-flash-lite")
 
 df = pd.read_excel("places_3000.xlsx")
-filtered_spot = df[(df["area"] == "종로구") & (df["category"] != "식당")][["name", "category", "lat", "lng"]]
+
+filtered_spot = df[(df["area"] == "종로구") & (df["category"] != "식당")][["name", "lat", "lng"]]
 print(f"필터링된 장소 개수 : {len(filtered_spot)}")
-filtered_restaurant = df[(df["area"] == "종로구") & (df["category"] == "식당")][["name", "category", "lat", "lng"]]
+filtered_restaurant = df[(df["area"] == "종로구") & (df["category"] == "식당")][["name", "lat", "lng"]]
+filtered_accom = df[(df["area"] == "종로구") & (df["category"] == "숙박")][["name", "lat", "lng"]]
+
 places = filtered_spot.to_dict(orient="records")
 restaurants = filtered_restaurant.to_dict(orient="records")
+accommodations = filtered_accom.to_dict(orient="records")
 
 start_date = "2026-01-21"
-end_date = "2026-01-28"
+end_date = "2026-01-22"
 start = datetime.strptime(start_date, "%Y-%m-%d")
 end = datetime.strptime(end_date, "%Y-%m-%d")
 days = (end - start).days + 1
@@ -91,11 +46,15 @@ schema = """
       ],
       "restaurants": [
         {"name": "...", "category": "식당", "lat": 0.0, "lng": 0.0}
+      ],
+      "accommodations": [
+        {"name": "...", "category": "숙박", "lat": 0.0, "lng": 0.0}
       ]
     },
     "day2": {
       "route": [],
-      "restaurants": []
+      "restaurants": [],
+      "accommodations": []
     }
   }
 }
@@ -113,8 +72,11 @@ system_prompt = f"""
 - 매일 관광지 4~6곳 + 식당 2곳 구성
 - route에는 places 목록에서만 선택
 - restaurants에는 restaurants 목록에서만 선택
+- accommodations에는 accommodations 목록에서만 선택
 - route는 이동 동선을 고려하여 방문 순서 최적화
 - restaurants는 해당 day의 마지막 관광지와 가까운 순서로 2곳 선택
+- accommodations는 해당 day의 마지막 관광지와 가까운 순서로 1곳 선택
+- {days}일차에는 accommodations 포함하지 않음
 - 설명 문장은 출력하지 않는다
 - 반드시 JSON만 출력한다
 """
@@ -124,6 +86,7 @@ user_prompt = {
     "start_location": {"lat": 37.5547, "lng": 126.9706},
     "places": places[:6*days*3],
     "restraurants": restaurants[:3*days*3],
+    "accommodations": accommodations[:days*3]
 }
 
 prompt = system_prompt + "\n\n" + json.dumps(user_prompt, ensure_ascii=False)
@@ -157,65 +120,6 @@ def extract_json(text):
 
 result = extract_json(response.text)
 print(json.dumps(result, ensure_ascii=False, indent=2))
-
-# # 거리 계산
-# def haversine(lat1, lon1, lat2, lon2):
-#     R = 6371  # km
-#     phi1 = math.radians(lat1)
-#     phi2 = math.radians(lat2)
-#     dphi = math.radians(lat2 - lat1)
-#     dlambda = math.radians(lon2 - lon1)
-
-#     a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
-#     return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1-a))
-
-# # 주변 음식점 찾기
-# def find_near_restaurants(place, restaurants, k=2):
-#     lat, lng = place["lat"], place["lng"]
-#     dists = []
-
-#     for r in restaurants:
-#         d = haversine(lat, lng, r["lat"], r["lng"])
-#         dists.append((d, r))
-
-#     dists.sort(key=lambda x: x[0])
-#     return [r for _, r in dists[:k]]
-
-# # 반드시 plans 구조로 접근
-# if "plans" not in result:
-#     raise ValueError("Gemini JSON에 plans 필드가 없습니다.")
-
-# plans = result["plans"]
-
-# final_result = {}
-
-# for day_key, day_places in plans.items():
-
-#     # 방어 코드
-#     if not isinstance(day_places, list):
-#         print(f"⚠ {day_key} 구조가 리스트가 아닙니다. 건너뜁니다.")
-#         continue
-
-#     day_restaurants = []
-
-#     for place in day_places:
-#         if "lat" not in place or "lng" not in place:
-#             continue
-
-#         near = find_near_restaurants(place, restaurants)
-#         day_restaurants.extend(near)
-
-#     # 중복 제거 + 하루 2곳
-#     unique = {r["name"]: r for r in day_restaurants}.values()
-#     day_restaurants = list(unique)[:2]
-
-#     final_result[day_key] = {
-#         "route": day_places,
-#         "restaurants": day_restaurants
-#     }
-
-# print("\n====== 최종 결과 ======\n")
-# print(json.dumps(final_result, ensure_ascii=False, indent=2))
 
 ## 교통 혼잡도 모델 (BPR 함수)
 # T = T0 × (1 + α × (V/C)^β)
