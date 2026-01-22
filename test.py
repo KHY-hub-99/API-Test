@@ -508,7 +508,8 @@ for i, day_key in enumerate(day_keys):
     else:
         todays_end = default_end_str
 
-    print(f"   (시간 설정: {todays_start} 시작" + (f" ~ {todays_end} 종료)" if todays_end else ")"))
+    timeset = f"{todays_start} 시작" + (f" ~ {todays_end} 종료" if todays_end else "")
+    print(timeset)
 
     # 3. 최적화 실행
     timeline = optimize_day(
@@ -519,6 +520,7 @@ for i, day_key in enumerate(day_keys):
         end_time_str=todays_end      # 종료 시간(마지막날용) 전달
     )
 
+    result["plans"][day_key]["timeset"] = timeset
     result["plans"][day_key]["timeline"] = timeline
 
     if not timeline:
