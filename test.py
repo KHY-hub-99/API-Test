@@ -79,7 +79,7 @@ print(f"총 여행 일수: {days}")
 # 규칙:
 # - 입력된 days 만큼 day1, day2, ... 생성
 # - 여행 시작 일자 : {start_date}, 여행 종료 일자 : {end_date}
-# - 매일 관광지 4~5곳 + 식당 2곳 구성
+# - 매일 관광지 5곳 + 식당 2곳 구성
 # - route에는 places 목록에서만 선택
 # - restaurants에는 restaurants 목록에서만 선택
 # - accommodations에는 accommodations 목록에서만 선택
@@ -142,9 +142,16 @@ print(f"총 여행 일수: {days}")
 # 설정
 # ============================================================
 
-START_TIME = datetime.strptime("09:00", "%H:%M")
 LUNCH_WINDOW = ("11:20", "13:20")
 DINNER_WINDOW = ("17:40", "19:30")
+first_day_start_str = input("여행 첫날 시작 시간 (예: 14:00) : ").strip()
+last_day_end_str = input("여행 마지막 날 종료 시간 (예: 18:00) : ").strip()
+
+default_start_str = "10:00"
+default_end_str = "21:00"
+
+if not first_day_start_str: first_day_start_str = default_start_str
+if not last_day_end_str: last_day_end_str = default_end_str
 
 FIXED_EVENTS = []
 
@@ -206,38 +213,60 @@ def get_fixed_events_for_day(fixed_events, target_date):
 # 노드 생성
 # ============================================================
 
-def build_fixed_nodes(fixed_events):
+def build_fixed_nodes(fixed_events, day_start_dt):
     nodes = []
     BUFFER = 15
 
     for event in fixed_events:
-        orig_start_min = int((parse_time(event["start"]) - START_TIME).total_seconds() / 60)
-        orig_end_min = int((parse_time(event["end"]) - START_TIME).total_seconds() / 60)
+        event_start = parse_time(event["start"])
+        event_end = parse_time(event["end"])
 
-        buffered_start_min = orig_start_min - BUFFER
+        # [핵심] '그날의 시작 시간'과의 차이를 분(minute)으로 계산
+        # 예: 시작 14:00, 이벤트 15:00 -> 60분 지점
+        orig_start_min = int((event_start - day_start_dt).total_seconds() / 60)
+        orig_end_min = int((event_end - day_start_dt).total_seconds() / 60)
+
+        raw_start_min = orig_start_min - BUFFER
+        buffered_start_min = max(0, raw_start_min)
+
         orig_duration = orig_end_min - orig_start_min
-        buffered_duration = orig_duration + (BUFFER * 2)
+        secured_front_buffer = orig_start_min - buffered_start_min
+
+        final_stay = secured_front_buffer + orig_duration + BUFFER
 
         nodes.append({
             "name": event["title"],
             "category": "고정일정",
             "lat": None,
             "lng": None,
-            "stay": buffered_duration,  # 늘어난 체류 시간 적용
+            "stay": final_stay,
             "type": "fixed",
-            # 윈도우: 13:55분에는 무조건 도착하도록 설정
-            "window": (buffered_start_min, buffered_start_min + 10),
-            
-            # [중요] 출력을 위해 원래 시간 저장
+            "window": (buffered_start_min, buffered_start_min + 10), # 시작 시간 엄수
             "orig_time_str": f"{event['start']} - {event['end']}" 
         })
 
     return nodes
 
-def build_nodes(places, restaurants, fixed_events):
+def build_nodes(places, restaurants, fixed_events, day_start_dt):
     nodes = []
+    
+    # [수정] 출발지 자동 설정 (입력 데이터가 비어있을 경우 대비)
+    if places:
+        first_place = places[0]
+    else:
+        # 예외 처리: 장소가 하나도 없으면 임의 좌표 사용
+        first_place = {"lat": 37.5665, "lng": 126.9780} 
 
-    # 관광지
+    nodes.append({
+        "name": "시작점",  # 내부용 (출력 안 됨)
+        "category": "출발",
+        "lat": first_place["lat"],
+        "lng": first_place["lng"],
+        "stay": 0,
+        "type": "depot"
+    })
+
+    # 1. 관광지
     for p in places:
         nodes.append({
             "name": p["name"],
@@ -248,28 +277,13 @@ def build_nodes(places, restaurants, fixed_events):
             "type": "spot"
         })
 
-    # 점심
-    nodes.append({
-        "name": restaurants[0]["name"],
-        "category": "식당",
-        "lat": restaurants[0]["lat"],
-        "lng": restaurants[0]["lng"],
-        "stay": 70,
-        "type": "lunch"
-    })
+    # 2. 식당
+    if restaurants:
+        nodes.append({ "name": restaurants[0]["name"], "category": "식당", "lat": restaurants[0]["lat"], "lng": restaurants[0]["lng"], "stay": 70, "type": "lunch" })
+        nodes.append({ "name": restaurants[1]["name"], "category": "식당", "lat": restaurants[1]["lat"], "lng": restaurants[1]["lng"], "stay": 70, "type": "dinner" })
 
-    # 저녁
-    nodes.append({
-        "name": restaurants[1]["name"],
-        "category": "식당",
-        "lat": restaurants[1]["lat"],
-        "lng": restaurants[1]["lng"],
-        "stay": 70,
-        "type": "dinner"
-    })
-
-    # 고정 일정
-    fixed_nodes = build_fixed_nodes(fixed_events)
+    # 3. 고정 일정
+    fixed_nodes = build_fixed_nodes(fixed_events, day_start_dt)
     nodes.extend(fixed_nodes)
 
     return nodes
@@ -278,28 +292,35 @@ def build_nodes(places, restaurants, fixed_events):
 # Time Window 설정
 # ============================================================
 
-def build_time_windows(nodes):
+def build_time_windows(nodes, day_start_dt):
     windows = []
+
+    # 윈도우 계산 헬퍼: 현재 날짜 시작 시간(day_start_dt) 기준 상대 분(min) 반환
+    def get_relative_window(time_str):
+        target_time = parse_time(time_str)
+        diff_min = int((target_time - day_start_dt).total_seconds() / 60)
+        return diff_min
+
+    lunch_start = get_relative_window(LUNCH_WINDOW[0])
+    lunch_end = get_relative_window(LUNCH_WINDOW[1])
+    dinner_start = get_relative_window(DINNER_WINDOW[0])
+    dinner_end = get_relative_window(DINNER_WINDOW[1])
 
     for n in nodes:
         if n["type"] == "lunch":
-            windows.append((
-                int((parse_time(LUNCH_WINDOW[0]) - START_TIME).total_seconds() / 60),
-                int((parse_time(LUNCH_WINDOW[1]) - START_TIME).total_seconds() / 60)
-            ))
-
+            # 만약 여행 시작(14:00)보다 점심(12:00)이 빠르면? -> 윈도우가 음수가 됨
+            # OR-Tools가 처리할 수 있게 하거나, Disjunction으로 인해 드랍되도록 둠
+            windows.append((lunch_start, lunch_end))
+        
         elif n["type"] == "dinner":
-            windows.append((
-                int((parse_time(DINNER_WINDOW[0]) - START_TIME).total_seconds() / 60),
-                int((parse_time(DINNER_WINDOW[1]) - START_TIME).total_seconds() / 60)
-            ))
-
+            windows.append((dinner_start, dinner_end))
+        
         elif n["type"] == "fixed":
-            # ✅ 고정 일정은 입력된 시작 시간에만 방문 가능
             windows.append(n["window"])
-
+        
         else:
-            windows.append((0, 12 * 60))  # 09:00~21:00
+            # 일반 관광지는 시간 제약 없음 (0 ~ 24시간)
+            windows.append((0, 24 * 60))
 
     return windows
 
@@ -307,31 +328,47 @@ def build_time_windows(nodes):
 # OR-Tools 모델 (수정됨)
 # ============================================================
 
-def optimize_day(places, restaurants, start_location, fixed_events):
-    # 노드 생성
-    nodes = build_nodes(places, restaurants, fixed_events)
+def optimize_day(places, restaurants, fixed_events, start_time_str, end_time_str=None):
+    # 1. 기준 시간 설정
+    day_start_dt = datetime.strptime(start_time_str, "%H:%M")
+    
+    # 2. 하루의 최대 길이(Horizon) 계산
+    if end_time_str:
+        day_end_dt = datetime.strptime(end_time_str, "%H:%M")
+        max_horizon_minutes = int((day_end_dt - day_start_dt).total_seconds() / 60)
+        if max_horizon_minutes < 0: max_horizon_minutes = 24 * 60 
+    else:
+        max_horizon_minutes = 24 * 60 
+
+    # 3. 노드 생성
+    nodes = build_nodes(places, restaurants, fixed_events, day_start_dt)
     n = len(nodes)
 
-    # 시간 매트릭스 생성
+    # 4. 시간 매트릭스 생성
     time_matrix = [[0]*n for _ in range(n)]
     for i in range(n):
         for j in range(n):
             if i == j: continue
             
-            # 1. i에서 j까지의 이동 시간
-            travel_time = travel_minutes(nodes[i], nodes[j])
+            travel_val = travel_minutes(nodes[i], nodes[j])
             
-            # 2. i에서의 체류 시간 (여기서 시간을 보내야 다음으로 이동 가능)
-            stay_time = nodes[i]["stay"]
+            # 고정 일정이 포함된 이동인가?
+            is_fixed_involved = (nodes[i]["type"] == "fixed" or nodes[j]["type"] == "fixed")
+            
+            if is_fixed_involved:
+                # [수정] 출발지(Depot)에서 고정 일정으로 바로 가는 경우 (오픈런)
+                # "거기서 여행 시작"으로 간주하여 이동 시간을 0으로 만듦
+                if nodes[i]["type"] == "depot" and nodes[j]["type"] == "fixed":
+                    travel_val = 0 
+                else:
+                    # 그 외의 경우(관광지->고정, 고정->관광지)는 20분 여유 확보
+                    travel_val = max(travel_val, 20)
 
-            # 3. i 도착 시점부터 j 도착 시점까지 걸리는 총 시간
-            time_matrix[i][j] = stay_time + travel_time
+            time_matrix[i][j] = nodes[i]["stay"] + travel_val
 
-    # 라우팅 매니저 설정
     manager = pywrapcp.RoutingIndexManager(n, 1, 0)
     routing = pywrapcp.RoutingModel(manager)
 
-    # 이동 시간 콜백
     def time_callback(from_idx, to_idx):
         i = manager.IndexToNode(from_idx)
         j = manager.IndexToNode(to_idx)
@@ -340,130 +377,157 @@ def optimize_day(places, restaurants, start_location, fixed_events):
     transit_callback = routing.RegisterTransitCallback(time_callback)
     routing.SetArcCostEvaluatorOfAllVehicles(transit_callback)
 
-    # 시간 제약 조건 (Dimension)
-    routing.AddDimension(transit_callback, 30, 12*60, False, "Time")
+    routing.AddDimension(transit_callback, 30, max_horizon_minutes, False, "Time")
     time_dim = routing.GetDimensionOrDie("Time")
 
-    # ---------------------------------------------------------
-    # [수정된 전략] 우선순위에 따른 Disjunction 설정
-    # ---------------------------------------------------------
-    
-    # 페널티 점수 설정 (높을수록 방문 중요도가 높음)
-    # 관광지 포기 페널티: 10만 점 (가볍게 포기 가능)
-    # 식당 포기 페널티: 100만 점 (웬만하면 가야 함)
-    # 고정 일정: Disjunction 없음 (무조건 가야 함, 절대 포기 불가)
-    
-    penalty_spot = 100000
-    penalty_meal = 1000000
+    # [중요] 페널티 설정
+    penalty_spot = 100000    # 관광지는 못 가면 아쉬움 (10만점)
+    penalty_meal = 1000000   # 식사는 시간 되면 꼭 가라 (100만점)
+
+    # 솔버 객체 미리 가져오기 (제약조건 추가용)
+    solver = routing.solver()
 
     for i, node in enumerate(nodes):
         index = manager.NodeToIndex(i)
         
-        # 1. 관광지 (Spot): 시간이 없으면 뺀다.
+        # Depot(출발점)는 패스
+        if node["type"] == "depot":
+            continue
+
+        time_windows = build_time_windows(nodes, day_start_dt)
+        window = time_windows[i] # 예: Lunch [-160, -100] (이미 지남)
+
+        # ------------------------------------------------
+        # 1. 고정 일정 (Fixed)
+        # ------------------------------------------------
+        if node["type"] == "fixed":
+            # 고정 일정은 약간 잘리더라도 최대한 방문하도록 보정
+            safe_start = max(0, min(window[0], max_horizon_minutes))
+            safe_end = max(safe_start, min(window[1], max_horizon_minutes))
+            
+            if safe_end < safe_start: safe_end = safe_start + 10
+            
+            time_dim.CumulVar(index).SetRange(safe_start, safe_end)
+            continue 
+
+        # -------------------------------------------------
+        # 2. 일반 관광지 및 식당 (엄격한 시간 검사)
+        # ---------------------------------------------------
+        raw_start = window[0]
+        raw_end = window[1]
+
+        overlap_start = max(0, raw_start)
+        overlap_end = min(max_horizon_minutes, raw_end)
+        has_overlap = overlap_start <= overlap_end
+
+        # 식당인데 시간이 안 맞으면? -> 제외
+        if not has_overlap:
+            routing.AddDisjunction([index], 0) 
+            solver.Add(routing.VehicleVar(index) == -1)
+            continue
+
+        # 시간 설정
+        time_dim.CumulVar(index).SetRange(overlap_start, overlap_end)
+        
         if node["type"] == "spot":
             routing.AddDisjunction([index], penalty_spot)
-            
-        # 2. 식당 (Lunch/Dinner): 
-        # 고정 일정과 겹치면 눈물을 머금고 식당을 뺀다 (경로 생성 성공을 위해)
         elif node["type"] in ["lunch", "dinner"]:
             routing.AddDisjunction([index], penalty_meal)
-            
-        # 3. 고정 일정 (Fixed): 
-        # 아무것도 안 함 -> 즉, 무조건 포함되어야 함. (Hard Constraint)
 
-    # Time Window 설정
-    time_windows = build_time_windows(nodes)
-    for i, window in enumerate(time_windows):
-        idx = manager.NodeToIndex(i)
-        time_dim.CumulVar(idx).SetRange(window[0], window[1])
-
-    # ---------------------------------------------------------
-    # [핵심 수정 2] 검색 전략 고도화 (Guided Local Search)
-    # ---------------------------------------------------------
+    # 검색 설정
     search_params = pywrapcp.DefaultRoutingSearchParameters()
-    
-    # 초기 해법 설정
     search_params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
-    
-    # 메타 휴리스틱: 지역 최적해(Local Optima)에 빠지지 않도록 탈출 전략 사용
     search_params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
-    
-    # 탐색 시간 제한 (복잡도에 따라 늘려주세요. 여기선 5초로 설정)
-    search_params.time_limit.seconds = 1
+    search_params.time_limit.seconds = 2
 
-    # 솔루션 계산
     solution = routing.SolveWithParameters(search_params)
 
     if not solution:
-        # Disjunction을 썼는데도 해가 없으면 진짜 불가능한 것
         return []
 
-    # 결과 추출
     index = routing.Start(0)
     timeline = []
 
     while not routing.IsEnd(index):
         node_idx = manager.IndexToNode(index)
-        
         node = nodes[node_idx]
 
-        # [수정된 부분] 시간 문자열 생성
+        if node["type"] == "depot":
+            index = solution.Value(routing.NextVar(index))
+            continue
+
         if node["type"] == "fixed":
-            # 고정 일정은 계산된 시간이 아니라, 입력했던 '원래 시간'을 사용
             time_str = node["orig_time_str"]
         else:
-            # 일반 장소는 계산된 시간 사용
             t = solution.Value(time_dim.CumulVar(index))
-            start_dt = START_TIME + timedelta(minutes=t)
-            stay_minutes = node["stay"]
-            end_dt = start_dt + timedelta(minutes=stay_minutes)
-            time_str = f"{start_dt.strftime('%H:%M')} - {end_dt.strftime('%H:%M')}"
+            visit_start = day_start_dt + timedelta(minutes=t)
+            visit_end = visit_start + timedelta(minutes=node["stay"])
+            time_str = f"{visit_start.strftime('%H:%M')} - {visit_end.strftime('%H:%M')}"
 
         timeline.append({
             "name": node["name"],
             "category": node["category"],
             "time": time_str
         })
-
         index = solution.Value(routing.NextVar(index))
 
     return timeline
-
 # ============================================================
 # 일정 타임라인 json에 추가 (실행부 수정)
 # ============================================================
 
-result = json.load(open("result.json", "r", encoding="utf-8"))
+result = json.load(open("result.json", "r", encoding="utf-8")) # 또는 기존 result 사용
 plans = result["plans"]
 current_date = start
 
-for day_key, day_data in plans.items():
+# 전체 날짜 리스트 확인
+day_keys = list(plans.keys())
+total_days = len(day_keys)
+
+for i, day_key in enumerate(day_keys):
     print(f"\n📅 {day_key} 일정 최적화")
 
+    day_data = plans[day_key]
     day_places = day_data["route"]
     day_restaurants = day_data["restaurants"]
-
     day_str = current_date.strftime("%Y-%m-%d")
     day_fixed_events = get_fixed_events_for_day(FIXED_EVENTS, day_str)
 
-    # [수정] optimize_with_auto_trim 대신 optimize_day 직접 호출
-    # 이제 솔버가 알아서 갈 수 없는 곳은 제외하고 결과를 줍니다.
+    # 1. 시작 시간 결정
+    if i == 0:
+        # 첫째 날
+        todays_start = first_day_start_str
+    else:
+        # 그 외 날짜
+        todays_start = default_start_str
+
+    # 2. 종료 시간 제한 결정
+    if i == total_days - 1:
+        # 마지막 날
+        todays_end = last_day_end_str
+    else:
+        todays_end = default_end_str
+
+    print(f"   (시간 설정: {todays_start} 시작" + (f" ~ {todays_end} 종료)" if todays_end else ")"))
+
+    # 3. 최적화 실행
     timeline = optimize_day(
-        day_places,
-        day_restaurants,
-        start_location={"lat": 37.5547, "lng": 126.9706},
-        fixed_events=day_fixed_events
+        places=day_places,
+        restaurants=day_restaurants,
+        fixed_events=day_fixed_events,
+        start_time_str=todays_start,       # 시작 시간 전달
+        end_time_str=todays_end      # 종료 시간(마지막날용) 전달
     )
 
     result["plans"][day_key]["timeline"] = timeline
 
     if not timeline:
-        print("⚠ 일정을 생성할 수 없습니다 (조건이 너무 까다롭습니다).")
+        print("   ⚠ 조건 만족하는 일정 생성 실패")
     else:
         for t in timeline:
-            print(f"{t['time']}  {t['name']} ({t['category']})")
+            print(f"   {t['time']}  {t['name']} ({t['category']})")
 
     current_date += timedelta(days=1)
 
-print("\n====== Gemini 결과 ======\n")
+print("\n====== 최종 결과 ======\n")
 print(json.dumps(result, ensure_ascii=False, indent=2))
