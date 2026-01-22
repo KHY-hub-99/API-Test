@@ -1,4 +1,4 @@
-import google.generativeai as genai
+from google import genai
 import json
 import pandas as pd
 import time
@@ -16,8 +16,7 @@ from ortools.constraint_solver import pywrapcp
 load_dotenv()
 API = os.getenv("API_KEY")
 
-genai.configure(api_key=API)
-model = genai.GenerativeModel("gemini-2.5-flash-lite")
+client = genai.Client(api_key=API)
 
 # ============================================================
 # 데이터 로드
@@ -107,7 +106,7 @@ prompt = system_prompt + "\n\n" + json.dumps(user_prompt, ensure_ascii=False)
 # ============================================================
 
 start_time = time.time()
-response = model.generate_content(prompt)
+response = client.models.generate_content(model="gemini-2.5-flash-lite", contents=prompt)
 elapsed = time.time() - start_time
 
 print("⏱ Gemini 응답 시간:", round(elapsed, 3), "초")
