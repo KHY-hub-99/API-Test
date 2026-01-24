@@ -256,7 +256,7 @@ def load_transport_network(osm_path, gtfs_paths, pickle_path="seoul_tn_cached.pk
     return tn
 
 osm_file = "./data/seoul.osm.pbf"
-gtfs_files = ["./data/south_korea_gtfs.zip"]
+gtfs_files = ["./data/seoul_gtfs.zip"]
 
 start_tn = time.time()
 transport_network = load_transport_network(osm_file, gtfs_files)

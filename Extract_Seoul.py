@@ -3,130 +3,136 @@ import zipfile
 import io
 import os
 
-# 서울 bbox
+# ==========================================
+# ⚙️ 설정
+# ==========================================
+INPUT_GTFS = "./data/south_korea_gtfs.zip"   # KTDB에서 다운받은 파일명
+OUTPUT_GTFS = "./data/seoul_gtfs.zip" # 결과 파일명
+
+# 서울시 바운더리 (필요에 따라 조정 가능)
+# 넉넉하게 잡은 서울 좌표입니다.
 MIN_LAT, MAX_LAT = 37.4703, 37.5875
 MIN_LNG, MAX_LNG = 126.8602, 127.104
 
-INPUT_GTFS = "./data/south_korea_gtfs.zip"
-OUTPUT_GTFS = "./data/seoul_gtfs.zip"
-
-SKIP_TRANSFERS = True 
-
-def filter_gtfs():
-    print(f"📂 {INPUT_GTFS} 로드 중... (Transfers 보존 모드)")
+def filter_gtfs_cascade():
+    print("🚀 GTFS 데이터 연쇄 필터링 시작...")
     
     dfs = {}
-    valid_stop_ids = set()
-    valid_trip_ids = set()
-    valid_route_ids = set()
     
-    with zipfile.ZipFile(INPUT_GTFS) as z:
-        # ---------------------------------------------------------
-        # 1. stops.txt (기준점)
-        # ---------------------------------------------------------
-        if "stops.txt" in z.namelist():
-            with z.open("stops.txt") as f:
-                # [핵심] 모든 ID를 문자열로 변환하고 공백 제거
-                stops = pd.read_csv(f, dtype=str)
-                if 'stop_id' in stops.columns:
-                    stops['stop_id'] = stops['stop_id'].str.strip()
-                
-                # 좌표 필터링 (float 변환 필요)
-                stops['stop_lat'] = stops['stop_lat'].astype(float)
-                stops['stop_lon'] = stops['stop_lon'].astype(float)
-                
-                initial_len = len(stops)
-                stops = stops[
-                    (stops['stop_lat'] >= MIN_LAT) & (stops['stop_lat'] <= MAX_LAT) &
-                    (stops['stop_lon'] >= MIN_LNG) & (stops['stop_lon'] <= MAX_LNG)
-                ]
-                dfs['stops.txt'] = stops
-                valid_stop_ids = set(stops['stop_id'])
-                print(f"✅ stops.txt: {initial_len} -> {len(stops)}")
-        else:
+    # GTFS 파일 읽기
+    with zipfile.ZipFile(INPUT_GTFS, 'r') as z:
+        
+        # 1. Stops.txt 필터링 (가장 먼저!)
+        # ------------------------------------------------
+        if "stops.txt" not in z.namelist():
             print("❌ stops.txt가 없습니다.")
             return
 
-        # ---------------------------------------------------------
-        # 2. transfers.txt (오류의 주범 -> 정밀 세척)
-        # ---------------------------------------------------------
-        if "transfers.txt" in z.namelist():
-            with z.open("transfers.txt") as f:
-                transfers = pd.read_csv(f, dtype=str)
-                
-                # 컬럼명에 공백이 있을 수 있으므로 공백 제거 (strip)
-                transfers.columns = [c.strip() for c in transfers.columns]
-                
-                if 'from_stop_id' in transfers.columns and 'to_stop_id' in transfers.columns:
-                    # 데이터 내 공백 제거
-                    transfers['from_stop_id'] = transfers['from_stop_id'].str.strip()
-                    transfers['to_stop_id'] = transfers['to_stop_id'].str.strip()
-                    
-                    initial_len = len(transfers)
-                    
-                    # [핵심 로직] 두 정류장이 모두 valid_stop_ids에 존재해야 함
-                    transfers = transfers[
-                        transfers['from_stop_id'].isin(valid_stop_ids) & 
-                        transfers['to_stop_id'].isin(valid_stop_ids)
-                    ]
-                    dfs['transfers.txt'] = transfers
-                    print(f"✅ transfers.txt: {initial_len} -> {len(transfers)} (유효한 환승만 남김)")
-                else:
-                    print("⚠️ transfers.txt에 필수 컬럼(from_stop_id, to_stop_id)이 없어 제외합니다.")
+        with z.open("stops.txt") as f:
+            stops = pd.read_csv(f, dtype=str)
+            # 공백 제거 및 좌표 변환
+            stops['stop_id'] = stops['stop_id'].str.strip()
+            stops['stop_lat'] = stops['stop_lat'].astype(float)
+            stops['stop_lon'] = stops['stop_lon'].astype(float)
+            
+            initial_stops = len(stops)
+            
+            # 좌표 기준 필터링
+            stops = stops[
+                (stops['stop_lat'] >= MIN_LAT) & (stops['stop_lat'] <= MAX_LAT) &
+                (stops['stop_lon'] >= MIN_LNG) & (stops['stop_lon'] <= MAX_LNG)
+            ]
+            
+            # 살아남은 정류장 ID 목록 확보
+            valid_stop_ids = set(stops['stop_id'])
+            dfs['stops.txt'] = stops
+            print(f"✅ 1. 정류장 필터링 완료: {initial_stops} -> {len(stops)}개")
 
-        # ---------------------------------------------------------
-        # 3. stop_times.txt
-        # ---------------------------------------------------------
+        # 2. Stop_times.txt 필터링 (정류장 ID 기준)
+        # ------------------------------------------------
         if "stop_times.txt" in z.namelist():
             with z.open("stop_times.txt") as f:
+                # 데이터가 크므로 필요한 컬럼 위주로 읽기
                 st = pd.read_csv(f, dtype=str)
                 st['stop_id'] = st['stop_id'].str.strip()
                 st['trip_id'] = st['trip_id'].str.strip()
                 
-                initial_len = len(st)
+                initial_st = len(st)
+                
+                # 살아있는 정류장에 포함된 시간표만 남김
                 st = st[st['stop_id'].isin(valid_stop_ids)]
-                dfs['stop_times.txt'] = st
+                
+                # 살아남은 Trip ID 목록 확보
                 valid_trip_ids = set(st['trip_id'])
-                print(f"✅ stop_times.txt: {initial_len} -> {len(st)}")
+                dfs['stop_times.txt'] = st
+                print(f"✅ 2. 시간표 필터링 완료: {initial_st} -> {len(st)}개")
 
-        # ---------------------------------------------------------
-        # 4. trips.txt
-        # ---------------------------------------------------------
+        # 3. Trips.txt 필터링 (Trip ID 기준)
+        # ------------------------------------------------
         if "trips.txt" in z.namelist():
             with z.open("trips.txt") as f:
                 trips = pd.read_csv(f, dtype=str)
                 trips['trip_id'] = trips['trip_id'].str.strip()
                 trips['route_id'] = trips['route_id'].str.strip()
                 
-                initial_len = len(trips)
+                initial_trips = len(trips)
+                
+                # 살아있는 시간표를 가진 Trip만 남김
                 trips = trips[trips['trip_id'].isin(valid_trip_ids)]
-                dfs['trips.txt'] = trips
+                
+                # 살아남은 Route ID 목록 확보
                 valid_route_ids = set(trips['route_id'])
-                print(f"✅ trips.txt: {initial_len} -> {len(trips)}")
+                dfs['trips.txt'] = trips
+                print(f"✅ 3. 운행정보 필터링 완료: {initial_trips} -> {len(trips)}개")
 
-        # ---------------------------------------------------------
-        # 5. routes.txt
-        # ---------------------------------------------------------
+        # 4. Routes.txt 필터링 (Route ID 기준)
+        # ------------------------------------------------
         if "routes.txt" in z.namelist():
             with z.open("routes.txt") as f:
                 routes = pd.read_csv(f, dtype=str)
                 routes['route_id'] = routes['route_id'].str.strip()
                 
-                initial_len = len(routes)
+                initial_routes = len(routes)
+                
+                # 살아있는 Trip을 가진 노선만 남김
                 routes = routes[routes['route_id'].isin(valid_route_ids)]
                 dfs['routes.txt'] = routes
-                print(f"✅ routes.txt: {initial_len} -> {len(routes)}")
+                print(f"✅ 4. 노선 필터링 완료: {initial_routes} -> {len(routes)}개")
 
-        # ---------------------------------------------------------
-        # 6. 나머지 파일 복사
-        # ---------------------------------------------------------
+        # 5. Transfers.txt 필터링 (Stop ID 기준 - 양쪽 모두 존재해야 함)
+        # ------------------------------------------------
+        if "transfers.txt" in z.namelist():
+            with z.open("transfers.txt") as f:
+                transfers = pd.read_csv(f, dtype=str)
+                transfers['from_stop_id'] = transfers['from_stop_id'].str.strip()
+                transfers['to_stop_id'] = transfers['to_stop_id'].str.strip()
+                
+                initial_trans = len(transfers)
+                
+                # from과 to 모두 서울 안에 있는 정류장이어야 함
+                transfers = transfers[
+                    transfers['from_stop_id'].isin(valid_stop_ids) & 
+                    transfers['to_stop_id'].isin(valid_stop_ids)
+                ]
+                dfs['transfers.txt'] = transfers
+                print(f"✅ 5. 환승정보 필터링 완료: {initial_trans} -> {len(transfers)}개")
+
+        # 6. 나머지 파일들 (Calendar, Agency 등)
+        # ------------------------------------------------
+        # 엄밀하게 하려면 calendar도 service_id로 필터링해야 하지만,
+        # r5py는 참조되지 않는 calendar가 있어도 에러를 내진 않으므로 그대로 둡니다.
         for filename in z.namelist():
             if filename not in dfs and filename.endswith(".txt"):
                 with z.open(filename) as f:
-                    dfs[filename] = pd.read_csv(f)
-                    print(f"ℹ️ {filename}: 그대로 복사")
+                    # Agency 등은 그냥 복사 (Encoding 문제 방지를 위해 pandas 경유)
+                    try:
+                        temp_df = pd.read_csv(f, dtype=str)
+                        dfs[filename] = temp_df
+                        print(f"ℹ️  {filename}: 복사됨")
+                    except:
+                        print(f"⚠️ {filename} 읽기 실패, 건너뜀")
 
-    # 저장
+    # 7. 저장
     print(f"💾 {OUTPUT_GTFS} 저장 중...")
     with zipfile.ZipFile(OUTPUT_GTFS, 'w', zipfile.ZIP_DEFLATED) as z_out:
         for name, df in dfs.items():
@@ -134,7 +140,7 @@ def filter_gtfs():
             df.to_csv(buffer, index=False)
             z_out.writestr(name, buffer.getvalue())
             
-    print("✨ 완료! 서울 GTFS 생성됨 (환승 정보 포함).")
+    print("✨ 모든 작업 완료! 무결성이 확보된 서울 GTFS가 생성되었습니다.")
 
 if __name__ == "__main__":
-    filter_gtfs()
+    filter_gtfs_cascade()
