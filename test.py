@@ -664,12 +664,13 @@ def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_
         if prev_node:
             transit_info = get_detailed_path_info(prev_node, node, current_r5_dt)
 
-        timeline.append({
-            "name": node["name"],
-            "category": node["category"],
-            "time": time_str,
-            "transit_info": transit_info
-        })
+        if node["type"] != "depot":
+            timeline.append({
+                "name": node["name"],
+                "category": node["category"],
+                "time": time_str,
+                "transit_info": transit_info
+            })
 
         current_r5_dt = r5_departure_dt + timedelta(minutes=t_start_min + node["stay"])
         prev_node = node

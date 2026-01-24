@@ -58,12 +58,6 @@
       "timeset": "14:00 시작 ~ 21:00 종료",
       "timeline": [
         {
-          "name": "시작점",
-          "category": "출발",
-          "time": "출발",
-          "transit_info": ""
-        },
-        {
           "name": "서울공예박물관",
           "category": "관광지",
           "time": "14:05 - 15:35",
@@ -138,12 +132,6 @@
       ],
       "timeset": "10:00 시작 ~ 18:00 종료",
       "timeline": [
-        {
-          "name": "시작점",
-          "category": "출발",
-          "time": "출발",
-          "transit_info": ""
-        },
         {
           "name": "낙산 성곽길",
           "category": "관광지",
