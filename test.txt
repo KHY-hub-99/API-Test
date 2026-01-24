@@ -4,8 +4,8 @@ OSM 파일 South Korea
 https://www.ktdb.go.kr/www/newAddPbldataReqstData.do?key=202&clTy=1
 교통망 GIS DB -> 대중교통만 선택 -> 전국 -> 2025 -> 대중교통GTFS(2024년 기준)
 
-Java 설치
-https://www.azul.com/downloads/?package=jdk#zulu
+Java 21 설치
+https://www.oracle.com/kr/java/technologies/downloads/#jdk21-windows
 설치 후 환경변수 설정
 1. 윈도우 검색창에 "시스템 환경 변수 편집" 검색
 2. 아래 환경변수 클릭

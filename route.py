@@ -1,6 +1,6 @@
 import os
 os.environ["JAVA_OPTS"] = "-Xmx8G"
-os.environ["JAVA_HOME"] = r"C:\Program Files\Java\jdk-23"
+os.environ["JAVA_HOME"] = r"C:\Program Files\Java\jdk-21.0.10"
 
 from google import genai
 import zipfile
@@ -11,7 +11,7 @@ import math
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from ortools.constraint_solver import routing_enums_pb2, pywrapcp
-import io
+import time
 from r5py import TransportNetwork, TravelTimeMatrix, DetailedItineraries, TransportMode
 
 # # GTFS 파일 경로 (본인의 경로로 수정)
@@ -270,7 +270,35 @@ def duration_to_minutes(val):
 # ============================================================
 # r5py 변수(스크립트 시작 시 한 번만 실행) / Java 설치 필수
 # ============================================================
-transport_network = TransportNetwork("./data/south-korea_V2.osm.pbf", ["./data/south_korea_gtfs.zip"])
+def load_transport_network(osm_path, gtfs_paths, pickle_path="tn_cached.pkl"):
+    # pickle이 존재하고 재생성 옵션이 꺼져 있으면 불러오기
+    if os.path.exists(pickle_path):
+        print(f"📦 Pickle 파일 '{pickle_path}' 로드 중...")
+        tn = TransportNetwork.__new__(TransportNetwork)
+        tn._transport_network = TransportNetwork._load_pickled_transport_network(self=TransportNetwork, path=pickle_path)
+        print("✅ 로드 완료")
+        return tn
+
+    # pickle 없거나 force_rebuild=True 면 새로 생성
+    print("🚀 TransportNetwork 새로 생성 중... (시간 걸림)")
+    tn = TransportNetwork(osm_path, gtfs_paths)
+
+    # 생성 후 pickle 저장
+    try:
+        tn._save_pickled_transport_network(path=pickle_path, transport_network=tn)
+        print(f"💾 생성 완료 후 pickle 저장: '{pickle_path}'")
+    except Exception as e:
+        print(f"⚠️ pickle 저장 실패: {e}")
+
+    return tn
+
+osm_file = "./data/south-korea_V2.osm.pbf"
+gtfs_files = ["./data/south_korea_gtfs.zip"]
+
+start_tn = time.time()
+transport_network = load_transport_network(osm_file, gtfs_files)
+end_tn = time.time()
+print(f"⏱ TransportNetwork 로드/생성 시간: {round(end_tn - start_tn, 2)}초")
 
 with zipfile.ZipFile("./data/south_korea_gtfs.zip") as z:
     with z.open("stops.txt") as f:
@@ -662,7 +690,10 @@ def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_
 
         transit_info = ""
         if prev_node:
+            start_detail = time.time()
             transit_info = get_detailed_path_info(prev_node, node, current_r5_dt)
+            end_detail = time.time()
+            print(f"(상세 경로 계산 시간: {round(end_detail - start_detail, 2)}초)")
 
         if node["type"] != "depot":
             timeline.append({
@@ -723,6 +754,7 @@ if __name__ == "__main__":
         print(timeset)
 
         # 2. 최적화 실행 (target_date_str 추가 전달)
+        start_opt = time.time()
         timeline = optimize_day(
             places=day_places,
             restaurants=day_restaurants,
@@ -731,6 +763,8 @@ if __name__ == "__main__":
             target_date_str=day_str,  # [수정] 날짜 정보 전달
             end_time_str=todays_end
         )
+        end_opt = time.time()
+        print(f"⏱ optimize_day 실행 시간: {round(end_opt - start_opt, 2)}초")
 
         result["plans"][day_key]["timeset"] = timeset
         result["plans"][day_key]["timeline"] = timeline
