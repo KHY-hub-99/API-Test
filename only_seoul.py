@@ -14,43 +14,6 @@ from ortools.constraint_solver import routing_enums_pb2, pywrapcp
 import time
 from r5py import TransportNetwork, TravelTimeMatrix, DetailedItineraries, TransportMode
 
-# # GTFS 파일 경로 (본인의 경로로 수정)
-# gtfs_path = "./data/south_korea_gtfs.zip"
-
-# try:
-#     with zipfile.ZipFile(gtfs_path) as z:
-#         # 1. feed_info.txt 확인 (가장 정확함)
-#         if "feed_info.txt" in z.namelist():
-#             with z.open("feed_info.txt") as f:
-#                 df = pd.read_csv(f)
-#                 print("📅 [feed_info.txt] 데이터 유효 기간:")
-#                 if 'feed_start_date' in df.columns:
-#                     print(f"   시작일: {df['feed_start_date'].iloc[0]}")
-#                     print(f"   종료일: {df['feed_end_date'].iloc[0]}")
-#                 else:
-#                     print("   날짜 정보 컬럼 없음")
-        
-#         # 2. calendar.txt 확인 (운행 스케줄 기준)
-#         elif "calendar.txt" in z.namelist():
-#             with z.open("calendar.txt") as f:
-#                 df = pd.read_csv(f)
-#                 print("📅 [calendar.txt] 운행 스케줄 범위:")
-#                 print(f"   가장 이른 날짜: {df['start_date'].min()}")
-#                 print(f"   가장 늦은 날짜: {df['end_date'].max()}")
-        
-#         # 3. calendar_dates.txt 확인 (예외 운행일 기준)
-#         elif "calendar_dates.txt" in z.namelist():
-#             with z.open("calendar_dates.txt") as f:
-#                 df = pd.read_csv(f)
-#                 print("📅 [calendar_dates.txt] 운행일 범위:")
-#                 print(f"   가장 이른 날짜: {df['date'].min()}")
-#                 print(f"   가장 늦은 날짜: {df['date'].max()}")
-#         else:
-#             print("⚠️ 날짜 정보를 확인할 파일이 없습니다.")
-
-# except Exception as e:
-#     print(f"❌ 오류: {e}")
-
 # # ============================================================
 # # API 설정
 # # ============================================================
@@ -270,7 +233,7 @@ def duration_to_minutes(val):
 # ============================================================
 # r5py 변수(스크립트 시작 시 한 번만 실행) / Java 설치 필수
 # ============================================================
-def load_transport_network(osm_path, gtfs_paths, pickle_path="tn_cached.pkl"):
+def load_transport_network(osm_path, gtfs_paths, pickle_path="seoul_tn_cached.pkl"):
     # pickle이 존재하고 재생성 옵션이 꺼져 있으면 불러오기
     if os.path.exists(pickle_path):
         print(f"📦 Pickle 파일 '{pickle_path}' 로드 중...")
@@ -292,7 +255,7 @@ def load_transport_network(osm_path, gtfs_paths, pickle_path="tn_cached.pkl"):
 
     return tn
 
-osm_file = "./data/south-korea_V2.osm.pbf"
+osm_file = "./data/seoul.osm.pbf"
 gtfs_files = ["./data/south_korea_gtfs.zip"]
 
 start_tn = time.time()
@@ -303,7 +266,7 @@ print(f"⏱ TransportNetwork 로드/생성 시간: {round(end_tn - start_tn, 2)}
 # ============================================================
 # stops, routes 매칭
 # ============================================================
-with zipfile.ZipFile("./data/south_korea_gtfs.zip") as z:
+with zipfile.ZipFile("./data/seoul_gtfs.zip") as z:
     with z.open("stops.txt") as f:
         stops_df = pd.read_csv(f)
 
@@ -312,7 +275,7 @@ STOP_ID_TO_NAME = dict(
     zip(stops_df["stop_id"].astype(str), stops_df["stop_name"])
 )
 
-with zipfile.ZipFile("./data/south_korea_gtfs.zip") as z:
+with zipfile.ZipFile("./data/seoul_gtfs.zip") as z:
     with z.open("routes.txt") as f:
         routes_df = pd.read_csv(f)
 
