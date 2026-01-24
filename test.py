@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from ortools.constraint_solver import routing_enums_pb2, pywrapcp
 import io
-from r5py import TransportNetwork, TravelTimeMatrix, DetailedItineraries
+from r5py import TransportNetwork, TravelTimeMatrix, DetailedItineraries, TransportMode
 
 # # GTFS 파일 경로 (본인의 경로로 수정)
 # gtfs_path = "./data/south_korea_gtfs.zip"
@@ -245,10 +245,61 @@ def travel_minutes(p1, p2):
 def get_fixed_events_for_day(fixed_events, target_date):
     return [e for e in fixed_events if e["date"] == target_date]
 
+def duration_to_minutes(val):
+    if val is None or pd.isna(val):
+        return 0
+
+    # 1️⃣ pandas Timedelta
+    if hasattr(val, "total_seconds"):
+        return int(val.total_seconds() / 60)
+
+    # 2️⃣ 문자열 "0 days HH:MM:SS"
+    if isinstance(val, str) and "day" in val:
+        try:
+            td = pd.to_timedelta(val)
+            return int(td.total_seconds() / 60)
+        except Exception:
+            return 0
+
+    # 3️⃣ 숫자
+    try:
+        return int(float(val))
+    except Exception:
+        return 0
+
 # ============================================================
-# r5py 네트워크 초기화 (스크립트 시작 시 한 번만 실행) / Java 설치 필수
+# r5py 변수(스크립트 시작 시 한 번만 실행) / Java 설치 필수
 # ============================================================
 transport_network = TransportNetwork("./data/south-korea_V2.osm.pbf", ["./data/south_korea_gtfs.zip"])
+
+with zipfile.ZipFile("./data/south_korea_gtfs.zip") as z:
+    with z.open("stops.txt") as f:
+        stops_df = pd.read_csv(f)
+        
+STOP_ID_TO_NAME = dict(
+    zip(stops_df["stop_id"], stops_df["stop_name"])
+)
+
+def get_stop_name(stop_id):
+    if pd.isna(stop_id):
+        return None
+    return STOP_ID_TO_NAME.get(str(stop_id))
+
+with zipfile.ZipFile("./data/south_korea_gtfs.zip") as z:
+    with z.open("routes.txt") as f:
+        routes_df = pd.read_csv(f)
+
+ROUTE_ID_TO_NAME = dict(
+    zip(
+        routes_df["route_id"].astype(str),
+        routes_df["route_short_name"].astype(str)
+    )
+)
+
+def get_route_name(route_id):
+    if pd.isna(route_id):
+        return None
+    return ROUTE_ID_TO_NAME.get(str(route_id))
 
 # ============================================================
 # r5py 기반 이동 시간 계산 함수 (수정됨)
@@ -257,146 +308,132 @@ def get_r5py_matrix(nodes, departure_time):
     """
     모든 노드 간의 대중교통 이동 시간 행렬을 한꺼번에 계산합니다.
     """
-    # 1. 좌표가 있는 노드만 추출
     valid_nodes = [n for n in nodes if n["lat"] is not None]
-    # 노드가 2개 미만이면 계산할 거리가 없음
-    if len(valid_nodes) < 2: return {}
+    if len(valid_nodes) < 2:
+        return {}
 
-    df = pd.DataFrame(valid_nodes)
     gdf = gpd.GeoDataFrame(
         valid_nodes,
-        geometry=gpd.points_from_xy([n['lng'] for n in valid_nodes], [n['lat'] for n in valid_nodes]),
+        geometry=gpd.points_from_xy(
+            [n['lng'] for n in valid_nodes],
+            [n['lat'] for n in valid_nodes]
+        ),
         crs="EPSG:4326"
     )
 
-    # 2. [변경점] TravelTimeMatrixComputer -> TravelTimeMatrix
-    # .compute_travel_times() 호출 삭제 (인스턴스 생성 시 바로 계산됨)
     try:
         matrix = TravelTimeMatrix(
             transport_network,
             origins=gdf,
             destinations=gdf,
             departure=departure_time,
-            transport_modes=["WALK", "TRANSIT"]
+            transport_modes=[TransportMode.WALK, TransportMode.TRANSIT]
         )
     except Exception as e:
         print(f"⚠️ 행렬 계산 중 오류: {e}")
         return {}
-    
-    # 3. 결과 변환 (DataFrame -> Dictionary)
-    # 최적화 로직에서 (from, to)로 바로 찾기 위해 딕셔너리로 변환
+
     r5_travel_times = {}
-    
-    # 결과 컬럼: 'from_id', 'to_id', 'travel_time'
     for row in matrix.itertuples():
-        t = row.travel_time
-        if not pd.isna(t):
-            # from_id와 to_id는 정수형 인덱스로 변환하여 저장
-            r5_travel_times[(int(row.from_id), int(row.to_id))] = int(t)
-            
+        if not pd.isna(row.travel_time):
+            r5_travel_times[(int(row.from_id), int(row.to_id))] = int(row.travel_time)
+
     return r5_travel_times
 
 # ============================================================
 # 상세 경로 추출 함수 (수정됨)
 # ============================================================
 def get_detailed_path_info(start_node, end_node, departure_time):
-    # 1. 디버깅 헤더 출력
-    print(f"\n{'='*60}")
-    print(f"🔍 [디버그 시작] {start_node['name']} ➡️ {end_node['name']}")
-    print(f"⏰ 검색 기준 시간(r5py 전달): {departure_time}")
-    
-    if start_node['lat'] is None or end_node['lat'] is None: 
-        print("⚠️ 좌표 없음 -> 함수 종료")
+    if start_node['lat'] is None or end_node['lat'] is None:
         return ""
-    if start_node['lat'] == end_node['lat'] and start_node['lng'] == end_node['lng']: 
+    if start_node['lat'] == end_node['lat'] and start_node['lng'] == end_node['lng']:
         return "이동 없음"
 
     origin = gpd.GeoDataFrame([start_node], geometry=gpd.points_from_xy([start_node['lng']], [start_node['lat']]), crs="EPSG:4326")
     dest = gpd.GeoDataFrame([end_node], geometry=gpd.points_from_xy([end_node['lng']], [end_node['lat']]), crs="EPSG:4326")
 
     try:
-        # 2. r5py 계산 시도
-        print("🚀 r5py 경로 탐색 요청 중...")
         computer = DetailedItineraries(
             transport_network,
             origins=origin,
             destinations=dest,
-            departure=departure_time, # 이 시간이 2024년인지 꼭 확인하세요!
-            transport_modes=["WALK", "TRANSIT"]
+            departure=departure_time,
+            transport_modes=[TransportMode.WALK, TransportMode.TRANSIT]
         )
-        
-        if hasattr(computer, "compute_itineraries"): itineraries = computer.compute_itineraries()
-        elif hasattr(computer, "itineraries"): itineraries = computer.itineraries
-        else: itineraries = computer
 
-        if itineraries.empty: 
-            print("❌ 결과 없음 (Empty DataFrame)")
-            return "도보 또는 경로 없음"
-        
-        # 3. 결과 데이터프레임 분석
-        print(f"✅ 경로 발견! (총 {len(itineraries)}개 옵션)")
-        print(f"📋 발견된 컬럼 목록: {itineraries.columns.tolist()}")
-        
-        # 최적 경로 (option 0)
-        if 'option' in itineraries.columns:
-            best_route = itineraries[itineraries['option'] == 0]
-        else:
-            best_route = itineraries
+        if computer.empty:
+            return "경로 없음"
 
-        details = []
-        
-        # 4. 세부 구간(Leg) 데이터 뜯어보기
-        for idx, (_, leg) in enumerate(best_route.iterrows()):
-            print(f"\n--- [구간 {idx+1}] 데이터 분석 ---")
-            
-            # (A) 모드 확인
-            mode_obj = leg.get('transport_mode')
-            mode = str(leg.get('mode', mode_obj))
-            print(f"   🔹 Mode (Raw): {mode}")
-            
-            # (B) 시간 확인
-            duration_val = leg.get('travel_time') # 우선순위 1
-            if pd.isna(duration_val): duration_val = leg.get('duration') # 우선순위 2
-            
-            print(f"   🔹 Duration (Raw): {duration_val} (Type: {type(duration_val)})")
-            
-            # 시간 변환 로직
-            if pd.isna(duration_val): duration = 1
-            elif hasattr(duration_val, 'total_seconds'): duration = int(duration_val.total_seconds() / 60)
-            else: 
-                try: duration = int(float(duration_val))
-                except: duration = 1
-            if duration < 1: duration = 1
-            print(f"   🔹 변환된 분(min): {duration}분")
+        def get_val(row, candidates, default=None):
+            for c in candidates:
+                if c in row.index and pd.notna(row[c]):
+                    val = str(row[c]).strip()
+                    if val: return val
+            return default
 
-            # (C) 노선 정보 확인
-            route_short = leg.get('route_short_name')
-            route_id = leg.get('route_id')
-            route = leg.get('route')
-            print(f"   🔹 Route Info: short='{route_short}', id='{route_id}', route='{route}'")
+        mode_col = 'transport_mode' if 'transport_mode' in computer.columns else 'mode'
 
-            # (D) 최종 문자열 조합
-            if 'WALK' in str(mode).upper():
-                details.append(f"🚶도보 {duration}분")
-            else:
-                final_route = route_short if not pd.isna(route_short) else (route_id if not pd.isna(route_id) else '대중교통')
-                
-                stop = leg.get('from_stop_name')
-                if pd.isna(stop): stop = leg.get('start_stop_name')
-                if pd.isna(stop): stop = '정류장'
-                
-                details.append(f"🚌[{final_route}] {stop} 승차({duration}분)")
-                
-        print(f"📝 최종 파싱 결과: {' -> '.join(details)}")
-        print(f"{'='*60}\n")
-        
-        return " -> ".join(details)
+        # 최적 경로 선택 (대중교통 포함 우선)
+        best_route = None
+        best_time = float("inf")
+
+        for _, group in computer.groupby("option"):
+            modes = group[mode_col].astype(str).str.upper().tolist()
+            has_transit = any(any(k in m for k in ['BUS', 'SUBWAY', 'RAIL', 'TRAM']) for m in modes)
+            if not has_transit: continue
+
+            total_minutes = 0
+            for _, leg in group.iterrows():
+                dur_val = get_val(leg, ['travel_time', 'duration'], 0)
+                duration = max(1, duration_to_minutes(dur_val))
+                total_minutes += duration
+
+            if total_minutes < best_time:
+                best_time = total_minutes
+                best_route = group
+
+        if best_route is None:
+            best_route = computer[computer['option'] == 0]
+
+        # 상세 경로 문자열 생성
+        path_segments = []
+        for _, leg in best_route.iterrows():
+            raw_mode = str(leg[mode_col]).upper()
+            dur_val = get_val(leg, ['travel_time', 'duration'], 0)
+            duration = max(1, duration_to_minutes(dur_val))
+
+            # 1. 도보 구간
+            if 'WALK' in raw_mode:
+                path_segments.append(f"도보 {duration}분")
+                continue
+
+            # 2. 대중교통 구간: 이름이 없으면 get_stop_name으로 ID 매칭
+            # 승차역 찾기
+            from_stop = get_val(leg, ['from_stop_name', 'start_stop_name'])
+            if not from_stop:
+                stop_id = get_val(leg, ['from_stop_id', 'start_stop_id', 'departure_stop'])
+                from_stop = get_stop_name(stop_id)
+            
+            # 하차역 찾기
+            to_stop = get_val(leg, ['to_stop_name', 'end_stop_name'])
+            if not to_stop:
+                stop_id = get_val(leg, ['to_stop_id', 'end_stop_id', 'arrival_stop'])
+                to_stop = get_stop_name(stop_id)
+
+            # 노선 및 수단 정보
+            route_id = get_val(leg, ['route_id'])
+            route_name = (get_val(leg, ['route_short_name']) or get_route_name(route_id) or get_val(leg, ['route_long_name']) or '대중교통')
+            mode_label = "지하철" if any(k in raw_mode for k in ['SUBWAY', 'RAIL', 'METRO']) else "버스"
+            
+            # 텍스트 조합
+            stop_info = f"{from_stop or '정류장'} -> {to_stop or '정류장'}"
+            path_segments.append(f"[{mode_label}][{route_name}] {stop_info} ({duration}분)")
+
+        return " > ".join(path_segments)
 
     except Exception as e:
-        print(f"🔥 [에러 발생] {e}")
-        import traceback
-        traceback.print_exc()
-        return "경로 에러"
+        print("DetailedItineraries 오류:", e)
+        return "경로 탐색 불가"
 
 # ============================================================
 # 노드 생성
@@ -410,8 +447,6 @@ def build_fixed_nodes(fixed_events, day_start_dt):
         event_start = parse_time(event["start"])
         event_end = parse_time(event["end"])
 
-        # [핵심] '그날의 시작 시간'과의 차이를 분(minute)으로 계산
-        # 예: 시작 14:00, 이벤트 15:00 -> 60분 지점
         orig_start_min = int((event_start - day_start_dt).total_seconds() / 60)
         orig_end_min = int((event_end - day_start_dt).total_seconds() / 60)
 
@@ -420,7 +455,6 @@ def build_fixed_nodes(fixed_events, day_start_dt):
 
         orig_duration = orig_end_min - orig_start_min
         secured_front_buffer = orig_start_min - buffered_start_min
-
         final_stay = secured_front_buffer + orig_duration + BUFFER
 
         nodes.append({
@@ -430,24 +464,23 @@ def build_fixed_nodes(fixed_events, day_start_dt):
             "lng": None,
             "stay": final_stay,
             "type": "fixed",
-            "window": (buffered_start_min, buffered_start_min + 10), # 시작 시간 엄수
-            "orig_time_str": f"{event['start']} - {event['end']}" 
+            "window": (buffered_start_min, buffered_start_min + 10),
+            "orig_time_str": f"{event['start']} - {event['end']}"
         })
 
     return nodes
 
+
 def build_nodes(places, restaurants, fixed_events, day_start_dt):
     nodes = []
-    
-    # [수정] 출발지 자동 설정 (입력 데이터가 비어있을 경우 대비)
+
     if places:
         first_place = places[0]
     else:
-        # 예외 처리: 장소가 하나도 없으면 임의 좌표 사용
-        first_place = {"lat": 37.5665, "lng": 126.9780} 
+        first_place = {"lat": 37.5665, "lng": 126.9780}
 
     nodes.append({
-        "name": "시작점",  # 내부용 (출력 안 됨)
+        "name": "시작점",
         "category": "출발",
         "lat": first_place["lat"],
         "lng": first_place["lng"],
@@ -455,7 +488,6 @@ def build_nodes(places, restaurants, fixed_events, day_start_dt):
         "type": "depot"
     })
 
-    # 1. 관광지
     for p in places:
         nodes.append({
             "name": p["name"],
@@ -466,16 +498,13 @@ def build_nodes(places, restaurants, fixed_events, day_start_dt):
             "type": "spot"
         })
 
-    # 2. 식당
     if restaurants:
         nodes.append({ "name": restaurants[0]["name"], "category": "식당", "lat": restaurants[0]["lat"], "lng": restaurants[0]["lng"], "stay": 70, "type": "lunch" })
         nodes.append({ "name": restaurants[1]["name"], "category": "식당", "lat": restaurants[1]["lat"], "lng": restaurants[1]["lng"], "stay": 70, "type": "dinner" })
 
-    # 3. 고정 일정
-    fixed_nodes = build_fixed_nodes(fixed_events, day_start_dt)
-    nodes.extend(fixed_nodes)
-
+    nodes.extend(build_fixed_nodes(fixed_events, day_start_dt))
     return nodes
+
 
 # ============================================================
 # Time Window 설정
@@ -484,11 +513,9 @@ def build_nodes(places, restaurants, fixed_events, day_start_dt):
 def build_time_windows(nodes, day_start_dt):
     windows = []
 
-    # 윈도우 계산 헬퍼: 현재 날짜 시작 시간(day_start_dt) 기준 상대 분(min) 반환
     def get_relative_window(time_str):
         target_time = parse_time(time_str)
-        diff_min = int((target_time - day_start_dt).total_seconds() / 60)
-        return diff_min
+        return int((target_time - day_start_dt).total_seconds() / 60)
 
     lunch_start = get_relative_window(LUNCH_WINDOW[0])
     lunch_end = get_relative_window(LUNCH_WINDOW[1])
@@ -497,138 +524,133 @@ def build_time_windows(nodes, day_start_dt):
 
     for n in nodes:
         if n["type"] == "lunch":
-            # 만약 여행 시작(14:00)보다 점심(12:00)이 빠르면? -> 윈도우가 음수가 됨
-            # OR-Tools가 처리할 수 있게 하거나, Disjunction으로 인해 드랍되도록 둠
             windows.append((lunch_start, lunch_end))
-        
         elif n["type"] == "dinner":
             windows.append((dinner_start, dinner_end))
-        
         elif n["type"] == "fixed":
             windows.append(n["window"])
-        
         else:
-            # 일반 관광지는 시간 제약 없음 (0 ~ 24시간)
             windows.append((0, 24 * 60))
 
     return windows
 
+
 # ============================================================
-# OR-Tools 모델 (수정됨)
+# OR-Tools 모델
 # ============================================================
 
 def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_str, end_time_str=None):
-    # 1. 기준 시간 설정
+    TRAVEL_BUFFER = 5  # ⭐ 이동 후 최소 여유시간 (분)
+
     day_start_dt = datetime.strptime(start_time_str, "%H:%M")
-    
-    # [핵심] r5py에게 전달할 '가짜 날짜' (GTFS 데이터가 있는 2024년 평일)
-    # 2024년 5월 20일 (월요일)로 고정합니다.
-    SAFE_GTFS_DATE = "2024-05-20"  
+
+    SAFE_GTFS_DATE = start_date
     r5_date_obj = datetime.strptime(SAFE_GTFS_DATE, "%Y-%m-%d")
     r5_departure_dt = datetime.combine(r5_date_obj, day_start_dt.time())
 
-    # 사용자에게 보여줄 '진짜 날짜' (출력용)
     display_date_obj = datetime.strptime(target_date_str, "%Y-%m-%d")
     display_start_dt = datetime.combine(display_date_obj, day_start_dt.time())
 
-    # 2. Horizon 계산
     if end_time_str:
         day_end_dt = datetime.strptime(end_time_str, "%H:%M")
         max_horizon_minutes = int((day_end_dt - day_start_dt).total_seconds() / 60)
-        if max_horizon_minutes < 0: max_horizon_minutes = 24 * 60 
+        if max_horizon_minutes < 0:
+            max_horizon_minutes = 24 * 60
     else:
-        max_horizon_minutes = 24 * 60 
+        max_horizon_minutes = 24 * 60
 
-    # 3. 노드 생성
     nodes = build_nodes(places, restaurants, fixed_events, day_start_dt)
-    n = len(nodes)
-    for idx, node in enumerate(nodes): node['id'] = idx
+    for idx, node in enumerate(nodes):
+        node["id"] = idx
 
-    # 4. Matrix 계산 (2024년 날짜 사용)
-    # 여기서 2024년 버스 시간을 가져오므로 이동 시간이 줄어듭니다.
+    n = len(nodes)
     r5_travel_times = get_r5py_matrix(nodes, r5_departure_dt)
 
-    # 5. OR-Tools Matrix 채우기
+    # 🔥 핵심 수정 구간
     time_matrix = [[0]*n for _ in range(n)]
     for i in range(n):
         for j in range(n):
-            if i == j: continue
-            
+            if i == j:
+                continue
+
             travel_val = r5_travel_times.get((i, j))
-            
-            # 대중교통이 없으면 도보 시간으로 대체
             if travel_val is None:
                 travel_val = travel_minutes(nodes[i], nodes[j])
-            
+
             is_fixed_involved = (nodes[i]["type"] == "fixed" or nodes[j]["type"] == "fixed")
             if is_fixed_involved:
-                if nodes[i]["type"] == "depot" and nodes[j]["type"] == "fixed": travel_val = 0 
-                else: travel_val = max(travel_val, 20)
-            
-            time_matrix[i][j] = nodes[i]["stay"] + int(travel_val)
+                if nodes[i]["type"] == "depot" and nodes[j]["type"] == "fixed":
+                    travel_val = 0
+                else:
+                    travel_val = max(travel_val, 20)
 
-    # 6. Solver 설정
+            # ✅ 이동시간 + 체류시간 + 버퍼
+            time_matrix[i][j] = nodes[i]["stay"] + int(travel_val) + TRAVEL_BUFFER
+
     manager = pywrapcp.RoutingIndexManager(n, 1, 0)
     routing = pywrapcp.RoutingModel(manager)
-    def time_callback(from_idx, to_idx): return time_matrix[manager.IndexToNode(from_idx)][manager.IndexToNode(to_idx)]
+
+    def time_callback(from_idx, to_idx):
+        return time_matrix[manager.IndexToNode(from_idx)][manager.IndexToNode(to_idx)]
+
     transit_callback = routing.RegisterTransitCallback(time_callback)
     routing.SetArcCostEvaluatorOfAllVehicles(transit_callback)
     routing.AddDimension(transit_callback, 30, max_horizon_minutes, False, "Time")
     time_dim = routing.GetDimensionOrDie("Time")
-    
+
     penalty_spot = 100000
-    penalty_meal = 1000000 
+    penalty_meal = 1000000
     solver = routing.solver()
+
+    time_windows = build_time_windows(nodes, day_start_dt)
 
     for i, node in enumerate(nodes):
         index = manager.NodeToIndex(i)
-        if node["type"] == "depot": continue
-        time_windows = build_time_windows(nodes, day_start_dt)
+        if node["type"] == "depot":
+            continue
+
         window = time_windows[i]
-        
+
         if node["type"] == "fixed":
             safe_start = max(0, min(window[0], max_horizon_minutes))
             safe_end = max(safe_start, min(window[1], max_horizon_minutes))
-            if safe_end < safe_start: safe_end = safe_start + 10
             time_dim.CumulVar(index).SetRange(safe_start, safe_end)
-            continue 
-            
-        raw_start, raw_end = window[0], window[1]
-        overlap_start = max(0, raw_start)
-        overlap_end = min(max_horizon_minutes, raw_end)
-        
-        if not (overlap_start <= overlap_end):
-            routing.AddDisjunction([index], 0) 
+            continue
+
+        overlap_start = max(0, window[0])
+        overlap_end = min(max_horizon_minutes, window[1])
+
+        if overlap_start > overlap_end:
+            routing.AddDisjunction([index], 0)
             solver.Add(routing.VehicleVar(index) == -1)
             continue
+
         time_dim.CumulVar(index).SetRange(overlap_start, overlap_end)
-        
-        if node["type"] == "spot": routing.AddDisjunction([index], penalty_spot)
-        elif node["type"] in ["lunch", "dinner"]: routing.AddDisjunction([index], penalty_meal)
+
+        if node["type"] == "spot":
+            routing.AddDisjunction([index], penalty_spot)
+        elif node["type"] in ["lunch", "dinner"]:
+            routing.AddDisjunction([index], penalty_meal)
 
     search_params = pywrapcp.DefaultRoutingSearchParameters()
     search_params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
     search_params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
-    search_params.time_limit.seconds = 2 
+    search_params.time_limit.seconds = 2
 
     solution = routing.SolveWithParameters(search_params)
-    if not solution: return []
+    if not solution:
+        return []
 
-    # 7. 결과 생성
     index = routing.Start(0)
     timeline = []
     prev_node = None
-    
-    # [매우 중요] 상세 경로 검색을 위한 시간 변수를 2024년으로 초기화
     current_r5_dt = r5_departure_dt
 
     while not routing.IsEnd(index):
         node_idx = manager.IndexToNode(index)
         node = nodes[node_idx]
-        
         t_start_min = solution.Value(time_dim.CumulVar(index))
 
-        # (1) 화면 표시용 시간 (2025/2026년 기준)
         if node["type"] == "fixed":
             time_str = node["orig_time_str"]
         elif node["type"] == "depot":
@@ -638,23 +660,18 @@ def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_
             visit_end = visit_start + timedelta(minutes=node["stay"])
             time_str = f"{visit_start.strftime('%H:%M')} - {visit_end.strftime('%H:%M')}"
 
-        # (2) 상세 경로 검색 (2024년 날짜 사용)
         transit_info = ""
         if prev_node:
-            # 여기서 current_r5_dt (2024년)를 넘겨줘야 버스가 나옵니다!
             transit_info = get_detailed_path_info(prev_node, node, current_r5_dt)
-        
+
         timeline.append({
             "name": node["name"],
             "category": node["category"],
             "time": time_str,
-            "transit_info": transit_info 
+            "transit_info": transit_info
         })
 
-        # (3) 다음 이동을 위해 2024년 기준 시간 업데이트
-        # r5py 출발 시간 = 2024년 시작 시간 + 누적 경과 시간 + 체류 시간
         current_r5_dt = r5_departure_dt + timedelta(minutes=t_start_min + node["stay"])
-        
         prev_node = node
         index = solution.Value(routing.NextVar(index))
 
@@ -721,8 +738,9 @@ if __name__ == "__main__":
             print("   ⚠ 조건 만족하는 일정 생성 실패")
         else:
             for t in timeline:
-                transit_msg = f" -> {t['transit_info']}" if t['transit_info'] else ""
-                print(f"   [{t['time']}] {t['name']} ({t['category']}){transit_msg}")
+                print(f"  [{t['time']}] {t['name']} ({t['category']})")
+                if t['transit_info'] and t['transit_info'] != "이동 없음":
+                    print(f"    └ 경로: {t['transit_info']}")
 
         current_date += timedelta(days=1)
 
