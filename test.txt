@@ -3,3 +3,13 @@ OSM 파일 South Korea
 
 https://www.ktdb.go.kr/www/newAddPbldataReqstData.do?key=202&clTy=1
 교통망 GIS DB -> 대중교통만 선택 -> 전국 -> 2025 -> 대중교통GTFS(2024년 기준)
+
+Java 설치
+https://www.azul.com/downloads/?package=jdk#zulu
+설치 후 환경변수 설정
+1. 윈도우 검색창에 "시스템 환경 변수 편집" 검색
+2. 아래 환경변수 클릭
+3. [시스템 변수] 섹션의 [새로 만들기] 클릭
+4. 변수 이름: JAVA_HOME / 변수 값: 복사한 JDK 경로 입력
+5. [시스템 변수]에서 Path를 찾아 선택
+6. [새로 만들기]를 누르고 %JAVA_HOME%\bin을 입력한 후 확인을 눌러 저장
