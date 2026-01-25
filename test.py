@@ -60,73 +60,100 @@ from datetime import datetime, timedelta
 # ==========================================
 transport_network = r5py.TransportNetwork(
     "./data/seoul_osm_v.pbf",
-    ["./data/seoul_subway_gtfs_V1.zip"]
+    ["./data/seoul_subway_gtfs_V2.zip"]
 )
 
 # ==========================================
-# 3. 출발지/도착지 설정 (GeoDataFrame)
+# 2. 출발/도착지 설정 (도로 위 좌표)
 # ==========================================
-# 테스트: 강남역(2호선) -> 홍대입구역(2호선)
-# stops.txt에 있는 좌표 근처로 설정해야 도보 연결이 잘 됩니다.
+# 강남역 10번 출구 앞 도로
 origins_df = pd.DataFrame({
-    "id": [1],
-    "name": ["강남역"],
-    "lat": [37.4985],
-    "lon": [127.0275]
+    "id": [1], "name": ["강남역"], "lat": [37.4985], "lon": [127.0275]
 })
-
+# 홍대입구역 2번 출구 앞 도로
 destinations_df = pd.DataFrame({
-    "id": [102],
-    "name": ["홍대입구역"],
-    "lat": [37.5569],
-    "lon": [126.9245]
+    "id": [102], "name": ["홍대입구"], "lat": [37.5569], "lon": [126.9245]
 })
 
-# 위경도 좌표계(EPSG:4326) 명시하여 변환
 origins = gpd.GeoDataFrame(
-    origins_df, 
-    geometry=gpd.points_from_xy(origins_df.lon, origins_df.lat), 
-    crs="EPSG:4326"
+    origins_df, geometry=gpd.points_from_xy(origins_df.lon, origins_df.lat), crs="EPSG:4326"
 )
-
 destinations = gpd.GeoDataFrame(
-    destinations_df, 
-    geometry=gpd.points_from_xy(destinations_df.lon, destinations_df.lat), 
-    crs="EPSG:4326"
+    destinations_df, geometry=gpd.points_from_xy(destinations_df.lon, destinations_df.lat), crs="EPSG:4326"
 )
 
 # ==========================================
-# 4. 여행 시간 계산 (TravelTimeMatrix)
+# 3. 상세 경로 계산 (DetailedItineraries)
 # ==========================================
-print("[2] 경로 탐색 계산 시작...")
+print("[2] 상세 경로 탐색 중...")
 
-# calendar.txt가 2025~2026년이므로 해당 기간의 평일로 설정
-test_date = datetime(2026, 1, 14, 8, 30) # 2025년 6월 18일 (수요일) 아침 8:30
+# 2026년 평일(수요일) 아침 8시 30분
+test_date = datetime(2026, 1, 28, 8, 30)
 
-matrix_computer = r5py.TravelTimeMatrix(
+# [수정됨] 최신 버전 클래스 사용
+computer = r5py.DetailedItineraries(
     transport_network,
     origins=origins,
     destinations=destinations,
     departure=test_date,
-    transport_modes=[r5py.TransportMode.TRANSIT],
-    
-    # [수정 포인트] 숫자가 아닌 timedelta 객체 사용 필수!
-    max_time_walking=timedelta(minutes=1000),   # 역까지 걷는 시간 최대 30분
+    transport_modes=[r5py.TransportMode.TRANSIT, r5py.TransportMode.WALK],
+    max_time_walking=timedelta(minutes=250), # 걷기 허용 시간 대폭 늘림
 )
 
+# 결과 계산 실행
+itineraries = computer
+
 # ==========================================
-# 5. 결과 확인
+# 4. 결과 분석 출력
 # ==========================================
-print("\n[3] 계산 결과:")
-if not matrix_computer.empty:
-    print(matrix_computer)
-    
-    # 보기 좋게 출력 (소요시간 분 단위)
-    for row in matrix_computer.itertuples():
-        t_min = row.travel_time
-        print(f"\n✅ {origins_df.iloc[0]['name']} -> {destinations_df.iloc[0]['name']}")
-        print(f"   소요 시간: {t_min}분")
+print("\n[3] 상세 이동 경로 분석:\n")
+
+if itineraries.empty:
+    print("❌ 경로가 생성되지 않았습니다.")
 else:
-    print("\n❌ 경로를 찾을 수 없습니다.")
-    print("   1. OSM 파일 범위가 출발/도착지를 포함하는지 확인하세요.")
-    print("   2. GTFS의 stops.txt 좌표와 출발/도착지 거리가 너무 멀지 않은지 확인하세요.")
+    # 첫 번째 추천 경로(option 0)만 추출
+    path = itineraries[itineraries['option'] == 0].copy()
+    
+    total_minutes = 0
+    step_count = 1
+    has_subway = False
+
+    for idx, row in path.iterrows():
+        # [수정] 알려주신 컬럼명 'transport_mode' 사용
+        mode = row['transport_mode'] 
+        
+        # travel_time이 Timedelta 객체이므로 분 단위 변환
+        duration = row['travel_time']
+        minutes = round(duration.total_seconds() / 60, 1)
+        
+        # 대기 시간 확인
+        wait_min = 0
+        if 'wait_time' in row and not pd.isna(row['wait_time']):
+             wait_min = round(row['wait_time'].total_seconds() / 60, 1)
+
+        # 노선 정보 (route_id)
+        route_info = ""
+        if 'route_id' in row and not pd.isna(row['route_id']):
+            route_info = f"[노선: {row['route_id']}]"
+            has_subway = True # 노선 정보가 있다는 건 대중교통을 탔다는 뜻
+
+        # 출력
+        print(f"▶ Step {step_count}: {mode}")
+        print(f"   - 소요 시간: {minutes}분")
+        if wait_min > 0:
+            print(f"   - 대기 시간: {wait_min}분")
+        if route_info:
+            print(f"   - {route_info}")
+            print(f"   - 구간: {row.get('start_stop_id', '?')} -> {row.get('end_stop_id', '?')}")
+        
+        print("-" * 30)
+        
+        total_minutes += minutes
+        step_count += 1
+
+    print(f"\n✅ 총 소요 시간: 약 {total_minutes}분")
+    
+    if has_subway or 'TRAM' in path['transport_mode'].values:
+        print("\n🎉 [성공] 지하철(TRAM) 경로가 포함되었습니다!")
+    else:
+        print("\n⚠️ [실패] 지하철을 타지 않았습니다. (전 구간 도보)")
