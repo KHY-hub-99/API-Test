@@ -832,38 +832,45 @@ def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_
     
     print(f"(상세 경로 일괄 계산 시간: {round(time.time() - batch_start, 2)}초)")
 
-    # 5-4. 최종 타임라인 조립
+    # 5-4. 최종 타임라인 조립 (수정 버전)
     timeline = []
     
-    for i, node in enumerate(visited_nodes):
-        # 시간 문자열 포맷팅
-        if node["type"] == "depot":
-            time_str = "출발"
-        elif node["type"] == "fixed":
+    # 시작점(depot)을 제외한 실제 방문지들만 추출
+    actual_visits = [n for n in visited_nodes if n["type"] != "depot"]
+
+    for i, node in enumerate(actual_visits):
+        # 1. 방문 시간 계산
+        if node["type"] == "fixed":
             time_str = node["orig_time_str"]
         else:
             visit_start = display_start_dt + timedelta(minutes=node['arrival_min'])
             visit_end = visit_start + timedelta(minutes=node["stay"])
             time_str = f"{visit_start.strftime('%H:%M')} - {visit_end.strftime('%H:%M')}"
 
-        # 경로 정보 매핑
+        # 2. 이전 장소로부터의 경로 계산
         transit_info = ""
         if i > 0:
-            prev = visited_nodes[i-1]
-            # Batch 결과 맵에서 (이전ID, 현재ID)로 경로 조회
-            transit_info = path_map.get((prev['id'], node['id']), "도보 이동")
+            prev_node = actual_visits[i-1]
+            dist = haversine(prev_node['lat'], prev_node['lng'], node['lat'], node['lng'])
             
-            # 좌표가 같으면 이동 없음 처리
-            if prev['lat'] == node['lat'] and prev['lng'] == node['lng']:
-                transit_info = "이동 없음"
+            # [핵심] 거리가 100m 미만이면 건물 내 이동으로 간주
+            if dist < 0.1: 
+                transit_info = "도보 이동 (건물 내 이동)"
+            else:
+                # r5py 경로가 있으면 그것을 쓰고, 없으면 도보 계산
+                r5_path = path_map.get((prev_node['id'], node['id']))
+                if r5_path:
+                    transit_info = r5_path
+                else:
+                    walk_min = approx_walk_minutes(prev_node, node)
+                    transit_info = f"도보 이동 (약 {round(walk_min)}분)"
 
-        if node["type"] != "depot":
-            timeline.append({
-                "name": node["name"],
-                "category": node["category"],
-                "time": time_str,
-                "transit_to_here": transit_info
-            })
+        timeline.append({
+            "name": node["name"],
+            "category": node["category"],
+            "time": time_str,
+            "transit_to_here": transit_info
+        })
 
     return timeline
 
@@ -930,10 +937,15 @@ if __name__ == "__main__":
         if not timeline:
             print("   ⚠ 조건 만족하는 일정 생성 실패")
         else:
-            for t in timeline:
+            for i, t in enumerate(timeline):
+                # 1. 경로 정보를 먼저 출력 (장소 사이의 '연결고리' 역할)
+                if t.get('transit_to_here') and "이동 없음" not in t['transit_to_here']:
+                    # 경로가 도보인지 대중교통인지에 따라 화살표 느낌 추가
+                    prefix = "    ▼ " 
+                    print(f"{prefix}{t['transit_to_here']}")
+
+                # 2. 그 다음 장소 정보를 출력
                 print(f"  [{t['time']}] {t['name']} ({t['category']})")
-                if t['transit_info'] and t['transit_info'] != "이동 없음":
-                    print(f"    └ 경로: {t['transit_info']}")
 
         current_date += timedelta(days=1)
 
