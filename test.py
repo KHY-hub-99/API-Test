@@ -99,7 +99,7 @@ computer = r5py.DetailedItineraries(
     transport_modes=[r5py.TransportMode.TRANSIT, r5py.TransportMode.WALK],
     max_time_walking=timedelta(minutes=250), # 걷기 허용 시간 대폭 늘림
 )
-
+print(computer.columns)
 # 결과 계산 실행
 itineraries = computer
 

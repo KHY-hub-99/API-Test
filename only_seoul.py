@@ -14,6 +14,17 @@ from ortools.constraint_solver import routing_enums_pb2, pywrapcp
 import time
 from r5py import TransportNetwork, TravelTimeMatrix, DetailedItineraries, TransportMode
 
+# ============================================================
+# 전역 상수 / 캐시
+# ============================================================
+DETAILED_PATH_CACHE = {}
+
+WALK_ONLY_THRESHOLD_MIN = 12   # 최소값
+WALK_ONLY_THRESHOLD_MAX = 18   # 최대값
+
+MAX_TRANSFERS = 2
+MAX_TRAVEL_TIME_MIN = 90
+
 # # ============================================================
 # # API 설정
 # # ============================================================
@@ -193,12 +204,29 @@ def parse_time(t):
     return datetime.strptime(t, "%H:%M")
 
 def haversine(lat1, lon1, lat2, lon2):
-    R = 6371
+    R = 6371  # km
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2-lat1)
-    dl = math.radians(lon2-lon1)
-    a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dl/2)**2
-    return 2*R*math.atan2(math.sqrt(a), math.sqrt(1-a))
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+
+    a = math.sin(dphi / 2) ** 2 + \
+        math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+def approx_walk_minutes(start, end):
+    dist_km = haversine(
+        start["lat"], start["lng"],
+        end["lat"], end["lng"]
+    )
+    return dist_km * 12  # 1km ≈ 12분
+
+def dynamic_walk_threshold(dist_km):
+    if dist_km < 0.6:
+        return WALK_ONLY_THRESHOLD_MAX   # 18
+    elif dist_km < 1.2:
+        return 15
+    else:
+        return WALK_ONLY_THRESHOLD_MIN   # 12
 
 def travel_minutes(p1, p2):
     if p1["lat"] is None or p2["lat"] is None:
@@ -267,14 +295,16 @@ print(f"⏱ TransportNetwork 로드/생성 시간: {round(end_tn - start_tn, 2)}
 # ============================================================
 # stops, routes 매칭
 # ============================================================
+# stops.txt 로드 부분 수정
 with zipfile.ZipFile("./data/seoul_area_gtfs.zip") as z:
     with z.open("stops.txt") as f:
-        stops_df = pd.read_csv(f)
+        stops_df = pd.read_csv(f, dtype={'stop_id': str}) # ID를 처음부터 문자열로 읽기
 
-# [핵심 수정] ID를 미리 문자열(str)로 확실하게 변환하여 딕셔너리 생성
-STOP_ID_TO_NAME = dict(
-    zip(stops_df["stop_id"].astype(str), stops_df["stop_name"])
-)
+# 딕셔너리 생성 시 공백 제거 및 확실한 문자열 처리
+STOP_ID_TO_NAME = {
+    str(row['stop_id']).strip(): str(row['stop_name']).strip() 
+    for _, row in stops_df.iterrows()
+}
 
 with zipfile.ZipFile("./data/seoul_area_gtfs.zip") as z:
     with z.open("routes.txt") as f:
@@ -287,12 +317,30 @@ ROUTE_ID_TO_NAME = dict(
 def get_stop_name(stop_id):
     if pd.isna(stop_id):
         return None
+    
+    # 1. 숫자/문자열 혼용 대응: "10100001.0" 같은 데이터를 "10100001"로 변환
     try:
-        safe_id = str(int(float(stop_id)))
-    except Exception:
-        safe_id = str(stop_id)
+        # 소수점이 포함된 경우를 대비해 float -> int -> str 순으로 변환
+        safe_id = str(int(float(stop_id))).strip()
+    except (ValueError, TypeError):
+        safe_id = str(stop_id).strip()
 
-    return STOP_ID_TO_NAME.get(safe_id)
+    # 2. 딕셔너리 조회
+    name = STOP_ID_TO_NAME.get(safe_id)
+    
+    # 3. 서울 GTFS 특성: 앞자리에 0이 포함된 5자리 ID 대응 (예: "05123")
+    if not name and len(safe_id) < 5:
+        name = STOP_ID_TO_NAME.get(safe_id.zfill(5))
+        
+    return name
+
+def safe_stop_name(val):
+    if pd.isna(val):
+        return None
+    try:
+        return get_stop_name(str(int(float(val))))
+    except Exception:
+        return get_stop_name(str(val))
 
 def get_route_name(route_id):
     if pd.isna(route_id):
@@ -346,46 +394,89 @@ def get_r5py_matrix(nodes, departure_time):
 # ============================================================
 # 상세 경로 추출 함수 (수정됨)
 # ============================================================
+
+def make_cache_key(start_node, end_node, departure_time):
+    """
+    정류장 단위 + 시간 버킷 캐시 키
+    """
+    hour_bucket = departure_time.hour
+
+    return (
+        start_node.get("nearest_stop_id") or start_node.get("id"),
+        end_node.get("nearest_stop_id") or end_node.get("id"),
+        hour_bucket
+    )
+
 def get_all_detailed_paths(trip_legs, departure_time):
     """
-    trip_legs: [(start_node, end_node), ...] 리스트
-    한 번의 r5py 호출로 모든 구간의 상세 경로를 계산하여 딕셔너리로 반환
+    필요한 구간만 상세 경로 계산 + 캐싱 + 선 컷 최적화
     """
     if not trip_legs:
         return {}
 
-    # 1. 출발지/도착지 목록 생성
-    origins_list = []
-    dests_list = []
-    
+    path_map = {}
+    origins_list, dests_list = [], []
+    valid_pairs = []
+
+    # ===============================
+    # 1️⃣ 선 필터링
+    # ===============================
     for start_node, end_node in trip_legs:
         if start_node['lat'] is None or end_node['lat'] is None:
             continue
         if start_node['id'] == end_node['id']:
             continue
-            
+
+        # 거리 기반 도보 컷
+        approx_min = approx_walk_minutes(start_node, end_node)
+        if approx_min <= dynamic_walk_threshold(
+            haversine(
+                start_node["lat"], start_node["lng"],
+                end_node["lat"], end_node["lng"]
+            )
+        ):
+            path_map[(start_node['id'], end_node['id'])] = f"도보 {round(approx_min)}분"
+            continue
+
+        # 캐시 키 (정류장 + 시간 버킷)
+        cache_key = make_cache_key(start_node, end_node, departure_time)
+        if cache_key in DETAILED_PATH_CACHE:
+            path_map[(start_node['id'], end_node['id'])] = DETAILED_PATH_CACHE[cache_key]
+            continue
+
         origins_list.append(start_node)
         dests_list.append(end_node)
+        valid_pairs.append((start_node['id'], end_node['id'], cache_key))
 
     if not origins_list:
-        return {}
+        return path_map
 
-    # 2. GeoDataFrame 생성
+    # ===============================
+    # 2️⃣ GeoDataFrame 생성
+    # ===============================
     origins_gdf = gpd.GeoDataFrame(
-        origins_list, 
-        geometry=gpd.points_from_xy([n['lng'] for n in origins_list], [n['lat'] for n in origins_list]),
+        origins_list,
+        geometry=gpd.points_from_xy(
+            [n['lng'] for n in origins_list],
+            [n['lat'] for n in origins_list]
+        ),
         crs="EPSG:4326"
     )
-    origins_gdf['id'] = [n['id'] for n in origins_list]
+    origins_gdf["id"] = [n["id"] for n in origins_list]
 
     dests_gdf = gpd.GeoDataFrame(
-        dests_list, 
-        geometry=gpd.points_from_xy([n['lng'] for n in dests_list], [n['lat'] for n in dests_list]),
+        dests_list,
+        geometry=gpd.points_from_xy(
+            [n['lng'] for n in dests_list],
+            [n['lat'] for n in dests_list]
+        ),
         crs="EPSG:4326"
     )
-    dests_gdf['id'] = [n['id'] for n in dests_list]
+    dests_gdf["id"] = [n["id"] for n in dests_list]
 
-    # 3. 상세 경로 일괄 계산
+    # ===============================
+    # 3️⃣ r5py 호출 (제한 적용)
+    # ===============================
     try:
         computer = DetailedItineraries(
             transport_network,
@@ -393,92 +484,83 @@ def get_all_detailed_paths(trip_legs, departure_time):
             destinations=dests_gdf,
             departure=departure_time,
             transport_modes=[TransportMode.WALK, TransportMode.TRANSIT],
-            
-            # [속도 개선 핵심] 무리한 경로 탐색 차단
-            max_time_walking=timedelta(minutes=15)   # 걷기는 최대 15분까지만 (그 이상 걸리면 포기)
+            max_public_transport_rides=MAX_TRANSFERS,
+            max_time=timedelta(minutes=MAX_TRAVEL_TIME_MIN)
         )
-        
-        if computer.empty:
-            return {}
-            
     except Exception as e:
-        print(f"⚠️ 상세 경로 일괄 계산 중 오류: {e}")
-        return {}
+        print(f"⚠️ 상세 경로 계산 오류: {e}")
+        return path_map
 
-    # ============================================================
-    # [Helper] 값 안전하게 가져오기 (보내주신 로직 적용용)
-    # ============================================================
+    if computer.empty:
+        return path_map
+
+    # ===============================
+    # 4️⃣ Helper
+    # ===============================
     def get_val(row, candidates, default=None):
         for c in candidates:
             if c in row.index and pd.notna(row[c]):
-                val = str(row[c]).strip()
-                if val: return val
+                v = str(row[c]).strip()
+                if v:
+                    return v
         return default
 
-    # 4. 결과 파싱
-    path_map = {}
     mode_col = 'transport_mode' if 'transport_mode' in computer.columns else 'mode'
 
+    # ===============================
+    # 5️⃣ 결과 파싱
+    # ===============================
     for (from_id, to_id), group in computer.groupby(['from_id', 'to_id']):
-        
-        # 최적 경로 선택
-        best_route = None
-        best_time = float("inf")
-        
-        for option_id, option_group in group.groupby("option"):
-            total_minutes = 0
-            for _, leg in option_group.iterrows():
-                dur_val = get_val(leg, ['travel_time', 'duration'], 0)
-                total_minutes += max(1, duration_to_minutes(dur_val))
-            
-            if total_minutes < best_time:
-                best_time = total_minutes
-                best_route = option_group
+        best_route, best_time = None, float("inf")
 
-        if best_route is None: 
+        for _, opt in group.groupby("option"):
+            total = sum(
+                max(1, duration_to_minutes(get_val(leg, ['travel_time', 'duration'], 0)))
+                for _, leg in opt.iterrows()
+            )
+            if total < best_time:
+                best_time, best_route = total, opt
+
+        if best_route is None:
             continue
 
-        # ============================================================
-        # [수정됨] 요청하신 텍스트 생성 로직 적용
-        # ============================================================
-        path_segments = []
+        segments = []
         for _, leg in best_route.iterrows():
             raw_mode = str(leg[mode_col]).upper()
-            dur_val = get_val(leg, ['travel_time', 'duration'], 0)
-            duration = max(1, duration_to_minutes(dur_val))
+            dur = max(1, duration_to_minutes(get_val(leg, ['travel_time', 'duration'], 0)))
 
-            # 1. 도보 구간
             if 'WALK' in raw_mode:
-                path_segments.append(f"도보 {duration}분")
+                segments.append(f"도보 {dur}분")
                 continue
 
-            # 2. 대중교통 구간: 이름이 없으면 get_stop_name으로 ID 매칭
-            # 승차역 찾기
-            from_stop = get_val(leg, ['from_stop_name', 'start_stop_name'])
-            if not from_stop:
-                stop_id = get_val(leg, ['from_stop_id', 'start_stop_id', 'departure_stop'])
-                from_stop = get_stop_name(stop_id)
-            
-            # 하차역 찾기
-            to_stop = get_val(leg, ['to_stop_name', 'end_stop_name'])
-            if not to_stop:
-                stop_id = get_val(leg, ['to_stop_id', 'end_stop_id', 'arrival_stop'])
-                to_stop = get_stop_name(stop_id)
+            # [수정] 실제 존재하는 컬럼명인 start_stop_id와 end_stop_id를 사용합니다.
+            # r5py 버전이나 설정에 따라 컬럼명이 다를 수 있으므로 유연하게 대처합니다.
+            from_stop_id = get_val(leg, ['start_stop_id', 'from_stop_id'])
+            to_stop_id = get_val(leg, ['end_stop_id', 'to_stop_id'])
 
-            # 노선 및 수단 정보
+            # 딕셔너리에서 이름 조회
+            from_stop = get_stop_name(from_stop_id) or f"미확정 정류장({from_stop_id})"
+            to_stop = get_stop_name(to_stop_id) or f"미확정 정류장({to_stop_id})"
+            
             route_id = get_val(leg, ['route_id'])
-            route_name = (get_val(leg, ['route_short_name']) or 
-                          get_route_name(route_id) or 
-                          get_val(leg, ['route_long_name']) or 
-                          '대중교통')
-            
-            mode_label = "지하철" if any(k in raw_mode for k in ['SUBWAY', 'RAIL', 'METRO']) else "버스"
-            
-            # 텍스트 조합
-            stop_info = f"{from_stop or '정류장'} -> {to_stop or '정류장'}"
-            path_segments.append(f"[{mode_label}][{route_name}] {stop_info} ({duration}분)")
-        
-        path_text = " > ".join(path_segments)
+            route_name = (
+                get_val(leg, ['route_short_name']) or 
+                get_route_name(route_id) or 
+                '대중교통'
+            )
+
+            mode_label = "지하철" if any(x in raw_mode for x in ['SUBWAY', 'RAIL', 'METRO']) else "버스"
+            segments.append(f"[{mode_label}][{route_name}] {from_stop} → {to_stop} ({dur}분)")
+
+        path_text = " > ".join(segments)
+
+        # 캐시 저장
+        cache_key = make_cache_key(
+            {"nearest_stop_id": str(from_id)},
+            {"nearest_stop_id": str(to_id)},
+            departure_time
+        )
+        DETAILED_PATH_CACHE[cache_key] = path_text
         path_map[(int(from_id), int(to_id))] = path_text
 
     return path_map
@@ -599,7 +681,7 @@ def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_
     # start_date는 전역 변수라고 가정
     SAFE_GTFS_DATE = start_date 
     r5_date_obj = datetime.strptime(SAFE_GTFS_DATE, "%Y-%m-%d")
-    r5_departure_dt = datetime.combine(r5_date_obj, day_start_dt.time())
+    r5_departure_dt = datetime.combine(r5_date_obj, datetime.strptime("11:00", "%H:%M").time())
 
     # 결과 출력용 실제 날짜
     display_date_obj = datetime.strptime(target_date_str, "%Y-%m-%d")
@@ -769,7 +851,7 @@ def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_
         if i > 0:
             prev = visited_nodes[i-1]
             # Batch 결과 맵에서 (이전ID, 현재ID)로 경로 조회
-            transit_info = path_map.get((prev['id'], node['id']), "도보 이동 (또는 경로 없음)")
+            transit_info = path_map.get((prev['id'], node['id']), "도보 이동")
             
             # 좌표가 같으면 이동 없음 처리
             if prev['lat'] == node['lat'] and prev['lng'] == node['lng']:
