@@ -257,7 +257,7 @@ def load_transport_network(osm_path, gtfs_paths, pickle_path="seoul_tn_cached.pk
     return tn
 
 osm_file = "./data/seoul_osm_v.pbf"
-gtfs_files = ["./data/south_korea_gtfs.zip"]
+gtfs_files = ["./data/seoul_area_gtfs.zip"]
 
 start_tn = time.time()
 transport_network = load_transport_network(osm_file, gtfs_files)
@@ -267,7 +267,7 @@ print(f"⏱ TransportNetwork 로드/생성 시간: {round(end_tn - start_tn, 2)}
 # ============================================================
 # stops, routes 매칭
 # ============================================================
-with zipfile.ZipFile("./data/south_korea_gtfs.zip") as z:
+with zipfile.ZipFile("./data/seoul_area_gtfs.zip") as z:
     with z.open("stops.txt") as f:
         stops_df = pd.read_csv(f)
 
@@ -276,7 +276,7 @@ STOP_ID_TO_NAME = dict(
     zip(stops_df["stop_id"].astype(str), stops_df["stop_name"])
 )
 
-with zipfile.ZipFile("./data/south_korea_gtfs.zip") as z:
+with zipfile.ZipFile("./data/seoul_area_gtfs.zip") as z:
     with z.open("routes.txt") as f:
         routes_df = pd.read_csv(f)
 
@@ -392,7 +392,10 @@ def get_all_detailed_paths(trip_legs, departure_time):
             origins=origins_gdf,
             destinations=dests_gdf,
             departure=departure_time,
-            transport_modes=[TransportMode.WALK, TransportMode.TRANSIT]
+            transport_modes=[TransportMode.WALK, TransportMode.TRANSIT],
+            
+            # [속도 개선 핵심] 무리한 경로 탐색 차단
+            max_time_walking=timedelta(minutes=15)   # 걷기는 최대 15분까지만 (그 이상 걸리면 포기)
         )
         
         if computer.empty:

@@ -60,7 +60,7 @@ from datetime import datetime, timedelta
 # ==========================================
 transport_network = r5py.TransportNetwork(
     "./data/seoul_osm_v.pbf",
-    ["./data/seoul_subway_gtfs_V2.zip"]
+    ["./data/seoul_area_gtfs.zip"]
 )
 
 # ==========================================
