@@ -46,6 +46,7 @@ from r5py import TransportNetwork, TravelTimeMatrix, DetailedItineraries, Transp
 start_date = input("여행 시작 일자 (예: 2026-01-20): ")
 end_date = input("여행 종료 일자 (예: 2026-01-25): ")
 
+
 start = datetime.strptime(start_date, "%Y-%m-%d")
 end = datetime.strptime(end_date, "%Y-%m-%d")
 days = (end - start).days + 1
@@ -256,7 +257,7 @@ def load_transport_network(osm_path, gtfs_paths, pickle_path="seoul_tn_cached.pk
     return tn
 
 osm_file = "./data/seoul.osm.pbf"
-gtfs_files = ["./data/seoul_gtfs.zip"]
+gtfs_files = ["./data/south_korea_gtfs.zip"]
 
 start_tn = time.time()
 transport_network = load_transport_network(osm_file, gtfs_files)
@@ -266,7 +267,7 @@ print(f"⏱ TransportNetwork 로드/생성 시간: {round(end_tn - start_tn, 2)}
 # ============================================================
 # stops, routes 매칭
 # ============================================================
-with zipfile.ZipFile("./data/seoul_gtfs.zip") as z:
+with zipfile.ZipFile("./data/south_korea_gtfs.zip") as z:
     with z.open("stops.txt") as f:
         stops_df = pd.read_csv(f)
 
@@ -275,7 +276,7 @@ STOP_ID_TO_NAME = dict(
     zip(stops_df["stop_id"].astype(str), stops_df["stop_name"])
 )
 
-with zipfile.ZipFile("./data/seoul_gtfs.zip") as z:
+with zipfile.ZipFile("./data/south_korea_gtfs.zip") as z:
     with z.open("routes.txt") as f:
         routes_df = pd.read_csv(f)
 
