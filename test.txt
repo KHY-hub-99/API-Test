@@ -13,3 +13,18 @@ https://www.oracle.com/kr/java/technologies/downloads/#jdk21-windows
 4. 변수 이름: JAVA_HOME / 변수 값: 복사한 JDK 경로 입력
 5. [시스템 변수]에서 Path를 찾아 선택
 6. [새로 만들기]를 누르고 %JAVA_HOME%\bin을 입력한 후 확인을 눌러 저장
+
+
+Seoul GTFS 만드는 데이터 출처첫차/막차
+배차시간(info) 버스
+https://t-data.seoul.go.kr/dataprovide/trafficdataviewfile.do?data_id=53
+
+정류소(stop) 버스
+https://data.seoul.go.kr/dataList/OA-15067/S/1/datasetView.do
+
+노선정보(route) 버스
+https://data.seoul.go.kr/dataList/OA-15262/F/1/datasetView.do
+
+
+지하철
+https://data.kric.go.kr/rips/M_01_01/intro.do?keywords=%EC%84%9C%EC%9A%B8&lcd=&mcd=
