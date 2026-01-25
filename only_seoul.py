@@ -862,7 +862,7 @@ def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_
                 "name": node["name"],
                 "category": node["category"],
                 "time": time_str,
-                "transit_info": transit_info
+                "transit_to_here": transit_info
             })
 
     return timeline
