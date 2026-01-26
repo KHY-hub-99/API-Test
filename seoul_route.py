@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from ortools.constraint_solver import routing_enums_pb2, pywrapcp
 import time
+import re
 from r5py import TransportNetwork, TravelTimeMatrix, DetailedItineraries, TransportMode
 
 # ============================================================
@@ -467,71 +468,58 @@ def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_
     end_path_time = time.time()
     print(f"⏱ 상세 경로 계산 완료: {round(end_path_time - start_path_time, 2)}초")
 
-    timeline = []
-    actual_visits = [n for n in visited_nodes if n["type"] != "depot"]
+    def build_timeline_by_type(path_type):
+        """path_type: 'fastest' 또는 'min_transfer'"""
+        timeline = []
+        actual_visits = [n for n in visited_nodes if n["type"] != "depot"]
+        cursor = display_start_dt + timedelta(minutes=actual_visits[0]['arrival_min'])
 
-    # 첫 장소의 시작 시간 보장
-    current_time_cursor = display_start_dt + timedelta(minutes=actual_visits[0]['arrival_min'])
+        for i, node in enumerate(actual_visits):
+            transit_info = []
+            travel_min = 0
+            
+            if i > 0:
+                prev = actual_visits[i-1]
+                path_options = path_map.get((prev['id'], node['id']))
+                
+                if path_options:
+                    # 선택된 타입(fastest 또는 min_transfer)에 따라 시간 계산
+                    chosen_path = path_options.get(path_type, path_options['fastest'])
+                    transit_info = chosen_path
+                    for segment in chosen_path:
+                        mins = re.findall(r'(\d+)분', segment)
+                        for m in mins: travel_min += int(m)
+                else:
+                    dist = haversine(prev['lat'], prev['lng'], node['lat'], node['lng'])
+                    travel_min = int(dist * 12)
+                    transit_info = [f"도보 : {travel_min}분"]
 
-    for i, node in enumerate(actual_visits):
-        transit_info = {} # [수정] 리스트에서 딕셔너리로 변경
-        travel_min = 0 
-        
-        # 1. 이동 경로 옵션 추출 및 이동 시간 계산
-        if i > 0:
-            prev = actual_visits[i-1]
-            dist = haversine(prev['lat'], prev['lng'], node['lat'], node['lng'])
-            
-            # [수정] 딕셔너리 형태의 경로 옵션을 가져옴
-            path_options = path_map.get((prev['id'], node['id']))
-            
-            if path_options:
-                transit_info = path_options
-                # [수정] 타임라인 시간 계산은 '최단 시간(fastest)' 경로의 분(min)을 합산하여 기준점으로 삼음
-                import re
-                for segment in path_options['fastest']:
-                    mins = re.findall(r'(\d+)분', segment)
-                    for m in mins:
-                        travel_min += int(m)
+            # 시간 확정 로직
+            if node["type"] == "fixed":
+                time_parts = node["orig_time_str"].split(" - ")
+                start_dt = datetime.strptime(f"{target_date_str} {time_parts[0]}", "%Y-%m-%d %H:%M")
+                end_dt = datetime.strptime(f"{target_date_str} {time_parts[1]}", "%Y-%m-%d %H:%M")
+                cursor = end_dt
+                time_str = node["orig_time_str"]
             else:
-                # 경로가 없는 경우 (직선거리 기준 도보)
-                travel_min = int(dist * 12)
-                walk_text = [f"도보 : {travel_min}분"]
-                if dist < 0.1:
-                    walk_text = ["도보 이동 (100m 이내)"]
-                    travel_min = 0
-                transit_info = {"fastest": walk_text, "min_transfer": walk_text}
+                start_dt = cursor + timedelta(minutes=travel_min)
+                end_dt = start_dt + timedelta(minutes=node["stay"])
+                time_str = f"{start_dt.strftime('%H:%M')} - {end_dt.strftime('%H:%M')}"
+                cursor = end_dt
 
-        # 2. 타임라인 시간 확정 (Logic: 이전 종료 + 최단 시간 이동)
-        if node["type"] == "fixed":
-            time_parts = node["orig_time_str"].split(" - ")
-            start_dt = datetime.strptime(f"{target_date_str} {time_parts[0]}", "%Y-%m-%d %H:%M")
-            end_dt = datetime.strptime(f"{target_date_str} {time_parts[1]}", "%Y-%m-%d %H:%M")
-            
-            wait_min = int((start_dt - current_time_cursor).total_seconds() / 60)
-            if wait_min > 0:
-                # 대기 시간은 모든 경로 옵션 공통으로 표시하기 위해 딕셔너리에 추가
-                for key in transit_info:
-                    transit_info[key].append(f"(대기 {wait_min}분)")
-            
-            current_time_cursor = end_dt
-            time_str = node["orig_time_str"]
-            
-        else:
-            start_dt = current_time_cursor + timedelta(minutes=travel_min)
-            end_dt = start_dt + timedelta(minutes=node["stay"])
-            time_str = f"{start_dt.strftime('%H:%M')} - {end_dt.strftime('%H:%M')}"
-            current_time_cursor = end_dt
+            timeline.append({
+                "name": node["name"],
+                "category": node["category"],
+                "time": time_str,
+                "transit": transit_info
+            })
+        return timeline
 
-        # 결과 저장
-        timeline.append({
-            "name": node["name"], 
-            "category": node["category"], 
-            "time": time_str, 
-            "transit_to_here": transit_info # [최단시간, 최소환승 딕셔너리 저장]
-        })
-
-    return timeline
+    # 두 가지 버전의 타임라인 생성
+    return {
+        "fastest_version": build_timeline_by_type("fastest"),
+        "min_transfer_version": build_timeline_by_type("min_transfer")
+    }
 
 # ============================================================
 # 6. 메인 실행부 (통합)
@@ -657,7 +645,7 @@ if __name__ == "__main__":
         todays_end = last_day_end_str if i == len(day_keys)-1 else default_end_str
         
         start_opt_time = time.time()
-        timeline = optimize_day(
+        day_results = optimize_day(
             places=plans[day_key]["route"],
             restaurants=plans[day_key]["restaurants"],
             fixed_events=get_fixed_events_for_day(FIXED_EVENTS, current_date.strftime("%Y-%m-%d")),
@@ -665,43 +653,33 @@ if __name__ == "__main__":
             target_date_str=current_date.strftime("%Y-%m-%d"),
             end_time_str=todays_end
         )
-        end_opt_time = time.time()
-        print(f"⏱ {day_key} 최적화 완료: {round(end_opt_time - start_opt_time, 2)}초")
+        print(f"⏱ {day_key} 최적화 완료: {round(time.time() - start_opt_time, 2)}초")
+    
+        # [수정] 여기서부터는 for 루프 내부(들여쓰기 유지)에 있어야 합니다.
+        # 각 날짜별로 계산된 결과를 JSON 객체에 저장
+        result["plans"][day_key]["timelines"] = day_results
         
-        result["plans"][day_key]["timeline"] = timeline
-        
-        if timeline:
+        # 각 날짜별로 화면 출력
+        for ver_key, label in [("fastest_version", "최단 시간"), ("min_transfer_version", "최소 환승")]:
+            timeline = day_results[ver_key]
+            
             separator = "-" * 60
-            print(f"\n{separator}")
-            print(f"SCHEDULE: {day_key} ({current_date.strftime('%Y-%m-%d')})")
+            print(f"\n[{label} 기준 일정] {day_key}")
             print(separator)
 
-            for i, t in enumerate(timeline):
-                # 1. 이동 경로 출력 (이전 장소에서 현재 장소로의 이동)
-                if t.get('transit_to_here'):
-                    opts = t['transit_to_here']
-                    print(f"\n  [TRANSIT]")
-                    
-                    def format_path(path_list):
-                        # " : "를 " ("로 바꾸고 끝에 ")"를 붙여 가독성 향상
-                        return " -> ".join([s.replace(" : ", " (") + ")" for s in path_list])
-
-                    # 최단시간 경로 출력
-                    print(f"    - 최단거리: {format_path(opts['fastest'])}")
-                    
-                    # 최소환승 경로 출력 (최단시간과 다를 경우에만)
-                    if opts.get('min_transfer') and opts['fastest'] != opts['min_transfer']:
-                        print(f"    - 최소환승: {format_path(opts['min_transfer'])}")
-                    print() # 경로와 다음 장소 사이 빈 줄
-
-                # 2. 장소 정보 출력
+            for t in timeline:
+                if t.get('transit'):
+                    # 리스트 형태의 경로를 화살표로 연결하여 출력
+                    path_str = " -> ".join([s.replace(" : ", " (") + ")" for s in t['transit']])
+                    print(f"  [TRANSIT] {path_str}")
                 print(f"  [{t['time']}] {t['name']} ({t['category']})")
+            
+            print(separator)
 
-            print(f"{separator}\n")
-
+        # 다음 날짜로 넘어감 (루프 내부)
         current_date += timedelta(days=1)
 
-    # 7. 최종 결과 저장
+    # 7. 모든 루프가 끝난 후 최종 파일 저장 (루프 외부)
     with open("result_timeline.json", "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
-    print(f"\n✅ 최종 일정이 'result_timeline.json' 파일로 저장되었습니다.")
+        print("\n전체 일정이 'result_timeline.json' 파일로 저장되었습니다.")
