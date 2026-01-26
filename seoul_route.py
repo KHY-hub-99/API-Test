@@ -14,6 +14,8 @@ from ortools.constraint_solver import routing_enums_pb2, pywrapcp
 import time
 import re
 from r5py import TransportNetwork, TravelTimeMatrix, DetailedItineraries, TransportMode
+import concurrent.futures
+import pickle
 
 # ============================================================
 # 1. 환경 설정 및 전역 상수
@@ -173,7 +175,6 @@ if os.path.exists(map_pickle_path):
     start_load = time.time()
     try:
         with open(map_pickle_path, 'rb') as f:
-            import pickle
             STOP_ROUTE_MAP = pickle.load(f)
         print(f"✅ 로드 완료: {round(time.time() - start_load, 2)}초")
     except Exception as e:
@@ -197,7 +198,6 @@ else:
         
         # [생성 완료 후 저장]
         with open(map_pickle_path, 'wb') as f:
-            import pickle
             pickle.dump(STOP_ROUTE_MAP, f)
             
         print(f"✅ 매핑 완료 및 캐시 저장 ({round(time.time() - start_map, 2)}초)")
