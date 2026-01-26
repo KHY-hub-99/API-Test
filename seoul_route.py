@@ -109,8 +109,10 @@ def extract_json(text):
 pickle_path = "seoul_tn_cached.pkl"
 if os.path.exists(pickle_path):
     print(f"📦 Pickle 파일 로드: {pickle_path}")
+    start_load = time.time()
     transport_network = TransportNetwork.__new__(TransportNetwork)
     transport_network._transport_network = TransportNetwork._load_pickled_transport_network(self=TransportNetwork, path=pickle_path)
+    print(f"⏱ 로드 완료: {round(time.time() - start_load, 2)}초")
 else:
     print("🚀 TransportNetwork 생성 중... (시간 소요)")
     start_tn = time.time()
@@ -218,10 +220,10 @@ def get_all_detailed_paths(trip_legs, departure_time):
         if start_node['id'] == end_node['id']: continue
         
         dist_val = haversine(start_node["lat"], start_node["lng"], end_node["lat"], end_node["lng"])
-        approx_min = dist_val * 12
+        approx_min = dist_val * 15
+        # [판단] 거리가 짧으면(dynamic_walk_threshold 이하), 비싼 r5py 계산을 안 하고 바로 결정해버림
         if approx_min <= dynamic_walk_threshold(dist_val):
-            # [수정] 문자열이 아닌 리스트로 저장
-            path_map[(start_node['id'], end_node['id'])] = [f"도보 {round(approx_min)}분"]
+            path_map[(start_node['id'], end_node['id'])] = [f"도보 : {round(approx_min)}분"]
             continue
 
         cache_key = make_cache_key(start_node, end_node, departure_time)
@@ -273,7 +275,7 @@ def get_all_detailed_paths(trip_legs, departure_time):
             dur = max(1, duration_to_minutes(get_val(leg, ['travel_time', 'duration'], 0)))
 
             if 'WALK' in raw_mode:
-                segments.append(f"도보 {dur}분")
+                segments.append(f"도보 : {dur}분")
                 continue
 
             from_stop_id = str(get_val(leg, ['start_stop_id', 'from_stop_id'])).strip()
@@ -313,7 +315,7 @@ def get_all_detailed_paths(trip_legs, departure_time):
             else:
                 final_route_str = current_route_name
 
-            segments.append(f"[{mode_label}][{final_route_str}] {from_stop} → {to_stop} ({dur}분)")
+            segments.append(f"[{mode_label}][{final_route_str}] : {from_stop} → {to_stop} : {dur}분")
 
         # [수정 요청 2] 문자열 join을 하지 않고 리스트 그대로 저장
         DETAILED_PATH_CACHE[make_cache_key({"id":from_id}, {"id":to_id}, departure_time)] = segments
@@ -461,38 +463,71 @@ def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_
     trip_legs = [(visited_nodes[i], visited_nodes[i+1]) for i in range(len(visited_nodes)-1)]
     
     print("🚀 상세 경로 계산 중...")
+    start_path_time = time.time()
     path_map = get_all_detailed_paths(trip_legs, r5_departure_dt)
+    end_path_time = time.time()
+    print(f"⏱ 상세 경로 계산 완료: {round(end_path_time - start_path_time, 2)}초")
 
     timeline = []
     actual_visits = [n for n in visited_nodes if n["type"] != "depot"]
 
-    for i, node in enumerate(actual_visits):
-        if node["type"] == "fixed":
-            time_str = node["orig_time_str"]
-        else:
-            v_start = display_start_dt + timedelta(minutes=node['arrival_min'])
-            v_end = v_start + timedelta(minutes=node["stay"])
-            time_str = f"{v_start.strftime('%H:%M')} - {v_end.strftime('%H:%M')}"
+    # 첫 장소의 시작 시간 보장
+    current_time_cursor = display_start_dt + timedelta(minutes=actual_visits[0]['arrival_min'])
 
-        transit_info = [] # 리스트로 초기화
+    for i, node in enumerate(actual_visits):
+        transit_info = []
+        travel_min = 0 # 실제 텍스트상 이동 시간
+        
+        # 1. 이동 시간 및 텍스트 계산
         if i > 0:
             prev = actual_visits[i-1]
             dist = haversine(prev['lat'], prev['lng'], node['lat'], node['lng'])
             
-            real_travel_min = r5_travel_times.get((prev['id'], node['id']))
-            if real_travel_min is None: real_travel_min = int(dist * 12)
-            
-            # path_map 결과는 이제 List[str] 입니다.
+            # 상세 경로 가져오기 (List[str])
             r5_path_list = path_map.get((prev['id'], node['id']))
-
-            if dist < 0.1: 
-                transit_info = ["도보 이동 (건물 내)"]
-            elif r5_path_list: 
-                transit_info = r5_path_list # 리스트 그대로 대입
+            
+            # 이동 시간 파싱 (텍스트에서 분 추출) 또는 거리 기반 계산
+            if r5_path_list:
+                transit_info = r5_path_list
+                # 텍스트 내의 모든 "X분"을 합산 (예: "도보 4분", "버스 10분" 등)
+                import re
+                for segment in r5_path_list:
+                    # "4분", "12분" 등 숫자 추출
+                    mins = re.findall(r'(\d+)분', segment)
+                    for m in mins:
+                        travel_min += int(m)
             else:
-                transit_info = [f"도보 {real_travel_min}분"]
+                # 경로가 없으면 직선거리 기준
+                travel_min = int(dist * 12)
+                if dist < 0.1:
+                    transit_info = ["도보 이동 (100m 이내)"]
+                    travel_min = 0 # 건물 내 이동은 시간 거의 안 씀
+                else:
+                    transit_info = [f"도보 : {travel_min}분"]
 
-        # JSON 구조에 리스트 형태로 저장됨
+        # 2. 타임라인 시간 확정 (Logic: 이전 종료 + 이동 시간)
+        if node["type"] == "fixed":
+            # 고정 일정은 원래 시간 엄수
+            time_parts = node["orig_time_str"].split(" - ")
+            start_dt = datetime.strptime(f"{target_date_str} {time_parts[0]}", "%Y-%m-%d %H:%M")
+            end_dt = datetime.strptime(f"{target_date_str} {time_parts[1]}", "%Y-%m-%d %H:%M")
+            
+            # 만약 도착했는데 시간이 남으면 '대기' 발생
+            wait_min = int((start_dt - current_time_cursor).total_seconds() / 60)
+            if wait_min > 0:
+                transit_info.append(f"(대기 {wait_min}분)")
+            
+            current_time_cursor = end_dt # 종료 시간으로 커서 이동
+            time_str = node["orig_time_str"]
+            
+        else:
+            start_dt = current_time_cursor + timedelta(minutes=travel_min)
+            end_dt = start_dt + timedelta(minutes=node["stay"])
+            
+            time_str = f"{start_dt.strftime('%H:%M')} - {end_dt.strftime('%H:%M')}"
+            current_time_cursor = end_dt # 다음을 위해 커서 업데이트
+
+        # 결과 저장
         timeline.append({
             "name": node["name"], 
             "category": node["category"], 
@@ -625,6 +660,7 @@ if __name__ == "__main__":
         todays_start = first_day_start_str if i == 0 else default_start_str
         todays_end = last_day_end_str if i == len(day_keys)-1 else default_end_str
         
+        start_opt_time = time.time()
         timeline = optimize_day(
             places=plans[day_key]["route"],
             restaurants=plans[day_key]["restaurants"],
@@ -633,14 +669,20 @@ if __name__ == "__main__":
             target_date_str=current_date.strftime("%Y-%m-%d"),
             end_time_str=todays_end
         )
+        end_opt_time = time.time()
+        print(f"⏱ {day_key} 최적화 완료: {round(end_opt_time - start_opt_time, 2)}초")
         
         result["plans"][day_key]["timeline"] = timeline
         
         if timeline:
             for t in timeline:
-                # 리스트 내부의 각 단계(step)를 줄바꿈하여 출력
-                if t.get('transit_to_here'): 
-                    for step in t['transit_to_here']:
+                if t.get('transit_to_here'):
+                    # 만약 문자열로 들어왔다면 리스트로 변환해서 처리 (안전장치)
+                    infos = t['transit_to_here']
+                    if isinstance(infos, str):
+                        infos = [infos]
+                        
+                    for step in infos:
                         print(f"    ▼ {step}")
                 
                 print(f"  [{t['time']}] {t['name']} ({t['category']})")
