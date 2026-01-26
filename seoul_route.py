@@ -407,7 +407,7 @@ def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_
                 if not (nodes[i]["type"]=="depot" and nodes[j]["type"]=="fixed"):
                     val = max(val, 20)
             
-            time_matrix[i][j] = nodes[i]["stay"] + int(val) + TRAVEL_BUFFER
+            time_matrix[i][j] = nodes[i]["stay"] + int(val)
 
     # OR-Tools Solver
     manager = pywrapcp.RoutingIndexManager(n, 1, 0)
@@ -490,7 +490,7 @@ def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_
             elif r5_path_text and not is_simple_walk: 
                 transit_info = r5_path_text
             else:
-                transit_info = f"도보 이동 ({real_travel_min}분) + 여유 {TRAVEL_BUFFER}분"
+                transit_info = f"도보 {real_travel_min}분"
 
         timeline.append({"name": node["name"], "category": node["category"], "time": time_str, "transit_to_here": transit_info})
 
