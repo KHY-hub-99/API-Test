@@ -215,15 +215,19 @@ def get_all_detailed_paths(trip_legs, departure_time):
     path_map = {}
     origins_list, dests_list = [], []
 
-    # 1. 선 필터링 (너무 가까우면 도보 처리) -> 리스트로 저장
+    # 1. 근거리 도보 필터링 (기존 동일)
     for start_node, end_node in trip_legs:
         if start_node['id'] == end_node['id']: continue
         
         dist_val = haversine(start_node["lat"], start_node["lng"], end_node["lat"], end_node["lng"])
         approx_min = dist_val * 15
-        # [판단] 거리가 짧으면(dynamic_walk_threshold 이하), 비싼 r5py 계산을 안 하고 바로 결정해버림
         if approx_min <= dynamic_walk_threshold(dist_val):
-            path_map[(start_node['id'], end_node['id'])] = [f"도보 : {round(approx_min)}분"]
+            path_info = [f"도보 : {round(approx_min)}분"]
+            # 근거리는 최단/최소가 의미가 없으므로 동일하게 설정
+            path_map[(start_node['id'], end_node['id'])] = {
+                "fastest": path_info, 
+                "min_transfer": path_info
+            }
             continue
 
         cache_key = make_cache_key(start_node, end_node, departure_time)
@@ -236,7 +240,7 @@ def get_all_detailed_paths(trip_legs, departure_time):
 
     if not origins_list: return path_map
 
-    # 2. r5py 상세 경로 요청 (기존 코드 유지)
+    # 2. r5py 상세 경로 요청 (기존 동일)
     origins_gdf = gpd.GeoDataFrame(origins_list, geometry=gpd.points_from_xy([n['lng'] for n in origins_list], [n['lat'] for n in origins_list]), crs="EPSG:4326")
     origins_gdf["id"] = [n["id"] for n in origins_list]
     dests_gdf = gpd.GeoDataFrame(dests_list, geometry=gpd.points_from_xy([n['lng'] for n in dests_list], [n['lat'] for n in dests_list]), crs="EPSG:4326")
@@ -259,67 +263,62 @@ def get_all_detailed_paths(trip_legs, departure_time):
             if c in row.index and pd.notna(row[c]): return str(row[c]).strip()
         return default
 
-    # 3. 상세 경로 파싱
-    for (from_id, to_id), group in computer.groupby(['from_id', 'to_id']):
-        best_route, best_time = None, float("inf")
-        # 가장 빠른 경로 선택 로직 (기존 유지)
-        for _, opt in group.groupby("option"):
-            total = sum(max(1, duration_to_minutes(get_val(leg, ['travel_time', 'duration'], 0))) for _, leg in opt.iterrows())
-            if total < best_time: best_time, best_route = total, opt
-        
-        if best_route is None: continue
-
-        segments = [] # 개별 스텝을 담을 리스트
-        for _, leg in best_route.iterrows():
+    # 세그먼트 파싱 내부 함수 (기존 동일)
+    def parse_route_to_segments(route_df):
+        segs = []
+        for _, leg in route_df.iterrows():
             raw_mode = str(leg[mode_col]).upper()
             dur = max(1, duration_to_minutes(get_val(leg, ['travel_time', 'duration'], 0)))
-
             if 'WALK' in raw_mode:
-                segments.append(f"도보 : {dur}분")
+                segs.append(f"도보 : {dur}분")
                 continue
-
-            from_stop_id = str(get_val(leg, ['start_stop_id', 'from_stop_id'])).strip()
-            to_stop_id = str(get_val(leg, ['end_stop_id', 'to_stop_id'])).strip()
-            from_stop = get_stop_name(from_stop_id) or "정류장"
-            to_stop = get_stop_name(to_stop_id) or "정류장"
             
-            current_route_id = str(get_val(leg, ['route_id'])).strip()
-            current_route_name = get_route_name(current_route_id) or '대중교통'
-            mode_label = "지하철" if any(x in raw_mode for x in ['SUBWAY', 'RAIL', 'METRO']) else "버스"
+            f_id, t_id = str(get_val(leg, ['start_stop_id', 'from_stop_id'])), str(get_val(leg, ['end_stop_id', 'to_stop_id']))
+            f_stop, t_stop = get_stop_name(f_id) or "정류장", get_stop_name(t_id) or "정류장"
+            c_rid = str(get_val(leg, ['route_id']))
+            mode_lbl = "지하철" if any(x in raw_mode for x in ['SUBWAY', 'RAIL', 'METRO']) else "버스"
             
-            final_route_str = ""
-
-            # [수정 요청 1] 같은 구간을 가는 다른 모든 버스 번호 찾기
-            if mode_label == "버스" and STOP_ROUTE_MAP:
-                routes_at_start = STOP_ROUTE_MAP.get(from_stop_id, set())
-                routes_at_end = STOP_ROUTE_MAP.get(to_stop_id, set())
-                common_route_ids = routes_at_start.intersection(routes_at_end)
-                
-                # 현재 탑승한 노선도 포함 보장
-                if current_route_id not in common_route_ids: common_route_ids.add(current_route_id)
-
-                bus_names = []
-                for rid in common_route_ids:
-                    rname = get_route_name(rid)
-                    if rname:
-                        bus_names.append(rname)
-                
-                # 번호순 정렬 (깔끔한 출력을 위해)
-                bus_names.sort()
-                
-                if not bus_names:
-                    final_route_str = current_route_name
-                else:
-                    # [종로02, 1020, 7025] 형태로 나열
-                    final_route_str = ", ".join(bus_names)
+            if mode_lbl == "버스" and STOP_ROUTE_MAP:
+                common = STOP_ROUTE_MAP.get(f_id, set()).intersection(STOP_ROUTE_MAP.get(t_id, set()))
+                common.add(c_rid)
+                b_names = sorted([n for n in [get_route_name(rid) for rid in common] if n])
+                r_str = ", ".join(b_names) if b_names else (get_route_name(c_rid) or '대중교통')
             else:
-                final_route_str = current_route_name
+                r_str = get_route_name(c_rid) or '대중교통'
+            segs.append(f"[{mode_lbl}][{r_str}] : {f_stop} → {t_stop} : {dur}분")
+        return segs
 
-            segments.append(f"[{mode_label}][{final_route_str}] : {from_stop} → {to_stop} : {dur}분")
+    # 3. 경로 옵션 비교 및 선정 (수정됨)
+    for (from_id, to_id), group in computer.groupby(['from_id', 'to_id']):
+        options_data = []
+        for _, opt in group.groupby("option"):
+            t_min = sum(max(1, duration_to_minutes(get_val(leg, ['travel_time', 'duration'], 0))) for _, leg in opt.iterrows())
+            t_count = sum(1 for _, leg in opt.iterrows() if 'WALK' not in str(leg[mode_col]).upper())
+            options_data.append({"route": opt, "time": t_min, "transfers": t_count})
 
-        # [수정 요청 2] 문자열 join을 하지 않고 리스트 그대로 저장
-        DETAILED_PATH_CACHE[make_cache_key({"id":from_id}, {"id":to_id}, departure_time)] = segments
-        path_map[(int(from_id), int(to_id))] = segments
+        if not options_data: continue
+
+        # [최단 시간] 시간 우선, 같으면 환승 적은 순
+        fastest_opt = min(options_data, key=lambda x: (x['time'], x['transfers']))
+        
+        # [최소 환승] 
+        # 환승 횟수 순으로 정렬 (0회 환승은 보통 장거리 도보임)
+        sorted_by_transfer = sorted(options_data, key=lambda x: (x['transfers'], x['time']))
+        
+        result_entry = {
+            "fastest": parse_route_to_segments(fastest_opt['route'])
+        }
+
+        # 옵션이 2개 이상인 경우, 0회 환승(도보) 다음의 '진짜' 대중교통 경로를 min_transfer로 사용
+        if len(sorted_by_transfer) > 1:
+            min_trans_opt = sorted_by_transfer[1]
+            result_entry["min_transfer"] = parse_route_to_segments(min_trans_opt['route'])
+        else:
+            # 옵션이 하나뿐이라면 최단 시간과 동일하게 처리
+            result_entry["min_transfer"] = result_entry["fastest"]
+
+        DETAILED_PATH_CACHE[make_cache_key({"id":from_id}, {"id":to_id}, departure_time)] = result_entry
+        path_map[(int(from_id), int(to_id))] = result_entry
 
     return path_map
 
@@ -475,64 +474,61 @@ def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_
     current_time_cursor = display_start_dt + timedelta(minutes=actual_visits[0]['arrival_min'])
 
     for i, node in enumerate(actual_visits):
-        transit_info = []
-        travel_min = 0 # 실제 텍스트상 이동 시간
+        transit_info = {} # [수정] 리스트에서 딕셔너리로 변경
+        travel_min = 0 
         
-        # 1. 이동 시간 및 텍스트 계산
+        # 1. 이동 경로 옵션 추출 및 이동 시간 계산
         if i > 0:
             prev = actual_visits[i-1]
             dist = haversine(prev['lat'], prev['lng'], node['lat'], node['lng'])
             
-            # 상세 경로 가져오기 (List[str])
-            r5_path_list = path_map.get((prev['id'], node['id']))
+            # [수정] 딕셔너리 형태의 경로 옵션을 가져옴
+            path_options = path_map.get((prev['id'], node['id']))
             
-            # 이동 시간 파싱 (텍스트에서 분 추출) 또는 거리 기반 계산
-            if r5_path_list:
-                transit_info = r5_path_list
-                # 텍스트 내의 모든 "X분"을 합산 (예: "도보 4분", "버스 10분" 등)
+            if path_options:
+                transit_info = path_options
+                # [수정] 타임라인 시간 계산은 '최단 시간(fastest)' 경로의 분(min)을 합산하여 기준점으로 삼음
                 import re
-                for segment in r5_path_list:
-                    # "4분", "12분" 등 숫자 추출
+                for segment in path_options['fastest']:
                     mins = re.findall(r'(\d+)분', segment)
                     for m in mins:
                         travel_min += int(m)
             else:
-                # 경로가 없으면 직선거리 기준
+                # 경로가 없는 경우 (직선거리 기준 도보)
                 travel_min = int(dist * 12)
+                walk_text = [f"도보 : {travel_min}분"]
                 if dist < 0.1:
-                    transit_info = ["도보 이동 (100m 이내)"]
-                    travel_min = 0 # 건물 내 이동은 시간 거의 안 씀
-                else:
-                    transit_info = [f"도보 : {travel_min}분"]
+                    walk_text = ["도보 이동 (100m 이내)"]
+                    travel_min = 0
+                transit_info = {"fastest": walk_text, "min_transfer": walk_text}
 
-        # 2. 타임라인 시간 확정 (Logic: 이전 종료 + 이동 시간)
+        # 2. 타임라인 시간 확정 (Logic: 이전 종료 + 최단 시간 이동)
         if node["type"] == "fixed":
-            # 고정 일정은 원래 시간 엄수
             time_parts = node["orig_time_str"].split(" - ")
             start_dt = datetime.strptime(f"{target_date_str} {time_parts[0]}", "%Y-%m-%d %H:%M")
             end_dt = datetime.strptime(f"{target_date_str} {time_parts[1]}", "%Y-%m-%d %H:%M")
             
-            # 만약 도착했는데 시간이 남으면 '대기' 발생
             wait_min = int((start_dt - current_time_cursor).total_seconds() / 60)
             if wait_min > 0:
-                transit_info.append(f"(대기 {wait_min}분)")
+                # 대기 시간은 모든 경로 옵션 공통으로 표시하기 위해 딕셔너리에 추가
+                for key in transit_info:
+                    transit_info[key].append(f"(대기 {wait_min}분)")
             
-            current_time_cursor = end_dt # 종료 시간으로 커서 이동
+            current_time_cursor = end_dt
             time_str = node["orig_time_str"]
             
         else:
             start_dt = current_time_cursor + timedelta(minutes=travel_min)
             end_dt = start_dt + timedelta(minutes=node["stay"])
-            
             time_str = f"{start_dt.strftime('%H:%M')} - {end_dt.strftime('%H:%M')}"
-            current_time_cursor = end_dt # 다음을 위해 커서 업데이트
+            current_time_cursor = end_dt
 
         # 결과 저장
         timeline.append({
             "name": node["name"], 
             "category": node["category"], 
             "time": time_str, 
-            "transit_to_here": transit_info 
+            "transit_to_here": transit_info # [최단시간, 최소환승 딕셔너리 저장]
         })
 
     return timeline
@@ -675,17 +671,33 @@ if __name__ == "__main__":
         result["plans"][day_key]["timeline"] = timeline
         
         if timeline:
-            for t in timeline:
+            separator = "-" * 60
+            print(f"\n{separator}")
+            print(f"SCHEDULE: {day_key} ({current_date.strftime('%Y-%m-%d')})")
+            print(separator)
+
+            for i, t in enumerate(timeline):
+                # 1. 이동 경로 출력 (이전 장소에서 현재 장소로의 이동)
                 if t.get('transit_to_here'):
-                    # 만약 문자열로 들어왔다면 리스트로 변환해서 처리 (안전장치)
-                    infos = t['transit_to_here']
-                    if isinstance(infos, str):
-                        infos = [infos]
-                        
-                    for step in infos:
-                        print(f"    ▼ {step}")
-                
+                    opts = t['transit_to_here']
+                    print(f"\n  [TRANSIT]")
+                    
+                    def format_path(path_list):
+                        # " : "를 " ("로 바꾸고 끝에 ")"를 붙여 가독성 향상
+                        return " -> ".join([s.replace(" : ", " (") + ")" for s in path_list])
+
+                    # 최단시간 경로 출력
+                    print(f"    - 최단거리: {format_path(opts['fastest'])}")
+                    
+                    # 최소환승 경로 출력 (최단시간과 다를 경우에만)
+                    if opts.get('min_transfer') and opts['fastest'] != opts['min_transfer']:
+                        print(f"    - 최소환승: {format_path(opts['min_transfer'])}")
+                    print() # 경로와 다음 장소 사이 빈 줄
+
+                # 2. 장소 정보 출력
                 print(f"  [{t['time']}] {t['name']} ({t['category']})")
+
+            print(f"{separator}\n")
 
         current_date += timedelta(days=1)
 
