@@ -165,21 +165,44 @@ def get_route_name(route_id):
 
 # 3-4. 정류장별 노선 매핑 (병렬 노선 탐색용)
 STOP_ROUTE_MAP = {}
-try:
-    print("🔄 정류장-노선 매핑 데이터 생성 중...")
-    start_map = time.time()
-    with zipfile.ZipFile(gtfs_files[0]) as z:
-        with z.open("trips.txt") as f:
-            trips = pd.read_csv(f, usecols=["route_id", "trip_id"])
-        with z.open("stop_times.txt") as f:
-            stop_times = pd.read_csv(f, usecols=["trip_id", "stop_id"], dtype={"stop_id": str})
-    
-    merged = stop_times.merge(trips, on="trip_id")
-    grouped = merged.groupby("stop_id")["route_id"].unique()
-    STOP_ROUTE_MAP = {str(k).strip(): set(v) for k, v in grouped.items()}
-    print(f"✅ 매핑 완료 ({round(time.time() - start_map, 2)}초)")
-except Exception as e:
-    print(f"⚠️ 정류장 매핑 실패: {e}")
+map_pickle_path = "./data/stop_route_map.pkl"
+
+# [수정] 캐시 파일이 있으면 로드하고 끝냄, 없으면 생성함
+if os.path.exists(map_pickle_path):
+    print(f"📦 STOP_ROUTE_MAP 캐시 로드 중...")
+    start_load = time.time()
+    try:
+        with open(map_pickle_path, 'rb') as f:
+            import pickle
+            STOP_ROUTE_MAP = pickle.load(f)
+        print(f"✅ 로드 완료: {round(time.time() - start_load, 2)}초")
+    except Exception as e:
+        print(f"⚠️ 캐시 로드 실패, 재생성 시도: {e}")
+        # 로드 실패 시 아래의 생성 로직이 실행되도록 처리
+else:
+    try:
+        print("🔄 STOP_ROUTE_MAP 캐시 없음. 데이터 생성 중...")
+        start_map = time.time()
+        
+        with zipfile.ZipFile(gtfs_files[0]) as z:
+            with z.open("trips.txt") as f:
+                trips = pd.read_csv(f, usecols=["route_id", "trip_id"])
+            with z.open("stop_times.txt") as f:
+                stop_times = pd.read_csv(f, usecols=["trip_id", "stop_id"], dtype={"stop_id": str})
+        
+        # 병합 및 중복 제거 최적화
+        merged = stop_times.merge(trips, on="trip_id")[["stop_id", "route_id"]].drop_duplicates()
+        grouped = merged.groupby("stop_id")["route_id"].apply(set)
+        STOP_ROUTE_MAP = grouped.to_dict()
+        
+        # [생성 완료 후 저장]
+        with open(map_pickle_path, 'wb') as f:
+            import pickle
+            pickle.dump(STOP_ROUTE_MAP, f)
+            
+        print(f"✅ 매핑 완료 및 캐시 저장 ({round(time.time() - start_map, 2)}초)")
+    except Exception as e:
+        print(f"⚠️ 정류장 매핑 실패: {e}")
 
 # ============================================================
 # 4. 경로 계산 및 상세화 (r5py)
