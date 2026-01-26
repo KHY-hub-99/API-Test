@@ -213,14 +213,15 @@ def get_all_detailed_paths(trip_legs, departure_time):
     path_map = {}
     origins_list, dests_list = [], []
 
-    # 1. 선 필터링 (너무 가까우면 도보 처리)
+    # 1. 선 필터링 (너무 가까우면 도보 처리) -> 리스트로 저장
     for start_node, end_node in trip_legs:
         if start_node['id'] == end_node['id']: continue
         
         dist_val = haversine(start_node["lat"], start_node["lng"], end_node["lat"], end_node["lng"])
         approx_min = dist_val * 12
         if approx_min <= dynamic_walk_threshold(dist_val):
-            path_map[(start_node['id'], end_node['id'])] = f"도보 {round(approx_min)}분"
+            # [수정] 문자열이 아닌 리스트로 저장
+            path_map[(start_node['id'], end_node['id'])] = [f"도보 {round(approx_min)}분"]
             continue
 
         cache_key = make_cache_key(start_node, end_node, departure_time)
@@ -233,7 +234,7 @@ def get_all_detailed_paths(trip_legs, departure_time):
 
     if not origins_list: return path_map
 
-    # 2. r5py 상세 경로 요청
+    # 2. r5py 상세 경로 요청 (기존 코드 유지)
     origins_gdf = gpd.GeoDataFrame(origins_list, geometry=gpd.points_from_xy([n['lng'] for n in origins_list], [n['lat'] for n in origins_list]), crs="EPSG:4326")
     origins_gdf["id"] = [n["id"] for n in origins_list]
     dests_gdf = gpd.GeoDataFrame(dests_list, geometry=gpd.points_from_xy([n['lng'] for n in dests_list], [n['lat'] for n in dests_list]), crs="EPSG:4326")
@@ -256,16 +257,17 @@ def get_all_detailed_paths(trip_legs, departure_time):
             if c in row.index and pd.notna(row[c]): return str(row[c]).strip()
         return default
 
-    # 3. 상세 경로 파싱 및 문자열 생성
+    # 3. 상세 경로 파싱
     for (from_id, to_id), group in computer.groupby(['from_id', 'to_id']):
         best_route, best_time = None, float("inf")
+        # 가장 빠른 경로 선택 로직 (기존 유지)
         for _, opt in group.groupby("option"):
             total = sum(max(1, duration_to_minutes(get_val(leg, ['travel_time', 'duration'], 0))) for _, leg in opt.iterrows())
             if total < best_time: best_time, best_route = total, opt
         
         if best_route is None: continue
 
-        segments = []
+        segments = [] # 개별 스텝을 담을 리스트
         for _, leg in best_route.iterrows():
             raw_mode = str(leg[mode_col]).upper()
             dur = max(1, duration_to_minutes(get_val(leg, ['travel_time', 'duration'], 0)))
@@ -279,45 +281,43 @@ def get_all_detailed_paths(trip_legs, departure_time):
             from_stop = get_stop_name(from_stop_id) or "정류장"
             to_stop = get_stop_name(to_stop_id) or "정류장"
             
-            # [핵심] 병렬 노선 찾기 및 간선/지선 필터링
             current_route_id = str(get_val(leg, ['route_id'])).strip()
             current_route_name = get_route_name(current_route_id) or '대중교통'
             mode_label = "지하철" if any(x in raw_mode for x in ['SUBWAY', 'RAIL', 'METRO']) else "버스"
             
             final_route_str = ""
 
+            # [수정 요청 1] 같은 구간을 가는 다른 모든 버스 번호 찾기
             if mode_label == "버스" and STOP_ROUTE_MAP:
                 routes_at_start = STOP_ROUTE_MAP.get(from_stop_id, set())
                 routes_at_end = STOP_ROUTE_MAP.get(to_stop_id, set())
                 common_route_ids = routes_at_start.intersection(routes_at_end)
                 
+                # 현재 탑승한 노선도 포함 보장
                 if current_route_id not in common_route_ids: common_route_ids.add(current_route_id)
 
-                route_infos = []
+                bus_names = []
                 for rid in common_route_ids:
                     rname = get_route_name(rid)
-                    if not rname: continue
-                    rtype_code = ROUTE_ID_TO_TYPE.get(rid, 3)
-                    rtype_str = get_route_type_str(rtype_code)
-
-                    if rtype_str not in ["간선", "지선"]: continue # 필터링
-
-                    order = 1 if rtype_str == "간선" else 2
-                    route_infos.append({"name": rname, "type": rtype_str, "order": order, "is_main": (rid == current_route_id)})
-
-                if not route_infos:
-                    final_route_str = current_route_name 
+                    if rname:
+                        bus_names.append(rname)
+                
+                # 번호순 정렬 (깔끔한 출력을 위해)
+                bus_names.sort()
+                
+                if not bus_names:
+                    final_route_str = current_route_name
                 else:
-                    route_infos.sort(key=lambda x: (not x['is_main'], x['order'], x['name']))
-                    final_route_str = ", ".join([f"[{i['type']}] {i['name']}" for i in route_infos])
+                    # [종로02, 1020, 7025] 형태로 나열
+                    final_route_str = ", ".join(bus_names)
             else:
                 final_route_str = current_route_name
 
             segments.append(f"[{mode_label}][{final_route_str}] {from_stop} → {to_stop} ({dur}분)")
 
-        path_text = " > ".join(segments)
-        DETAILED_PATH_CACHE[make_cache_key({"id":from_id}, {"id":to_id}, departure_time)] = path_text
-        path_map[(int(from_id), int(to_id))] = path_text
+        # [수정 요청 2] 문자열 join을 하지 않고 리스트 그대로 저장
+        DETAILED_PATH_CACHE[make_cache_key({"id":from_id}, {"id":to_id}, departure_time)] = segments
+        path_map[(int(from_id), int(to_id))] = segments
 
     return path_map
 
@@ -474,25 +474,31 @@ def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_
             v_end = v_start + timedelta(minutes=node["stay"])
             time_str = f"{v_start.strftime('%H:%M')} - {v_end.strftime('%H:%M')}"
 
-        transit_info = ""
+        transit_info = [] # 리스트로 초기화
         if i > 0:
             prev = actual_visits[i-1]
             dist = haversine(prev['lat'], prev['lng'], node['lat'], node['lng'])
             
-            # [시간 동기화]
             real_travel_min = r5_travel_times.get((prev['id'], node['id']))
             if real_travel_min is None: real_travel_min = int(dist * 12)
             
-            r5_path_text = path_map.get((prev['id'], node['id']))
-            is_simple_walk = (r5_path_text and "도보" in r5_path_text and ">" not in r5_path_text)
+            # path_map 결과는 이제 List[str] 입니다.
+            r5_path_list = path_map.get((prev['id'], node['id']))
 
-            if dist < 0.1: transit_info = "도보 이동 (건물 내)"
-            elif r5_path_text and not is_simple_walk: 
-                transit_info = r5_path_text
+            if dist < 0.1: 
+                transit_info = ["도보 이동 (건물 내)"]
+            elif r5_path_list: 
+                transit_info = r5_path_list # 리스트 그대로 대입
             else:
-                transit_info = f"도보 {real_travel_min}분"
+                transit_info = [f"도보 {real_travel_min}분"]
 
-        timeline.append({"name": node["name"], "category": node["category"], "time": time_str, "transit_to_here": transit_info})
+        # JSON 구조에 리스트 형태로 저장됨
+        timeline.append({
+            "name": node["name"], 
+            "category": node["category"], 
+            "time": time_str, 
+            "transit_to_here": transit_info 
+        })
 
     return timeline
 
@@ -632,7 +638,11 @@ if __name__ == "__main__":
         
         if timeline:
             for t in timeline:
-                if t.get('transit_to_here'): print(f"    ▼ {t['transit_to_here']}")
+                # 리스트 내부의 각 단계(step)를 줄바꿈하여 출력
+                if t.get('transit_to_here'): 
+                    for step in t['transit_to_here']:
+                        print(f"    ▼ {step}")
+                
                 print(f"  [{t['time']}] {t['name']} ({t['category']})")
 
         current_date += timedelta(days=1)
