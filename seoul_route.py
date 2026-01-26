@@ -106,7 +106,7 @@ def extract_json(text):
 # ============================================================
 
 # 3-1. TransportNetwork (r5py)
-pickle_path = "seoul_tn_cached.pkl"
+pickle_path = "./data/seoul_tn_cached.pkl"
 if os.path.exists(pickle_path):
     print(f"📦 Pickle 파일 로드: {pickle_path}")
     start_load = time.time()
