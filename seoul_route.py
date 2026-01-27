@@ -456,7 +456,7 @@ def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_
 
     search_params = pywrapcp.DefaultRoutingSearchParameters()
     search_params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
-    search_params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+    # search_params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
 
     solution = routing.SolveWithParameters(search_params)
     if not solution: return []
