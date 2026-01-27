@@ -2,10 +2,14 @@ import os
 import multiprocessing
 
 available_cores = multiprocessing.cpu_count()
-NUM_CORES_TO_USE = available_cores 
-print(f"⚙️  설정된 사용 코어 수: {NUM_CORES_TO_USE}개")
+JAVA_PARALLELISM = 2
+if available_cores > JAVA_PARALLELISM:
+    JAVA_PARALLELISM = JAVA_PARALLELISM
+else:
+    JAVA_PARALLELISM = available_cores
+print(f"⚙️  설정된 사용 코어 수: {JAVA_PARALLELISM}개")
 os.environ["JAVA_HOME"] = r"C:\Program Files\Java\jdk-21.0.10"
-os.environ["JAVA_OPTS"] = f"-Xmx8G -Djava.util.concurrent.ForkJoinPool.common.parallelism={NUM_CORES_TO_USE}"
+os.environ["JAVA_OPTS"] = f"-Xmx8G -Djava.util.concurrent.ForkJoinPool.common.parallelism={JAVA_PARALLELISM}"
 
 from google import genai
 import zipfile
@@ -467,6 +471,7 @@ def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_
     search_params = pywrapcp.DefaultRoutingSearchParameters()
     search_params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
     # search_params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+    # search_params.time_limit.seconds = 1
 
     solution = routing.SolveWithParameters(search_params)
     if not solution: return []
@@ -690,7 +695,7 @@ if __name__ == "__main__":
     # 6-2. ThreadPoolExecutor로 병렬 실행
     processed_results = {}
 
-    with ThreadPoolExecutor(max_workers=NUM_CORES_TO_USE) as executor:
+    with ThreadPoolExecutor(max_workers=JAVA_PARALLELISM) as executor:
         for day_key, day_res in executor.map(process_day_wrapper, tasks):
             processed_results[day_key] = day_res
             print(f"   ✅ {day_key} 완료")
