@@ -263,14 +263,21 @@ def get_all_detailed_paths(trip_legs, departure_time):
         segs = []
         for _, leg in route_df.iterrows():
             raw_mode = str(leg[mode_col]).upper()
-            dur = max(1, duration_to_minutes(get_val(leg, ['travel_time', 'duration'], 0)))
-            wait = duration_to_minutes(get_val(leg, ['wait_time', 'wait'], 0))
-            wait_str = f"대기 | {wait}분 -> " if wait > 0 else ""
+            
+            # 시간 파싱
+            ride_time = max(1, duration_to_minutes(get_val(leg, ['travel_time', 'duration'], 0)))
+            wait_time = duration_to_minutes(get_val(leg, ['wait_time', 'wait'], 0))
 
+            # [수정됨] 대기 시간이 있으면 리스트에 별도 요소로 추가
+            if wait_time > 0:
+                segs.append(f"대기 : {wait_time}분")
+
+            # 1. 도보 처리
             if 'WALK' in raw_mode:
-                segs.append(f"도보 : {dur}분")
+                segs.append(f"도보 : {ride_time}분")
                 continue
             
+            # 2. 대중교통 처리
             f_id, t_id = str(get_val(leg, ['start_stop_id', 'from_stop_id'])), str(get_val(leg, ['end_stop_id', 'to_stop_id']))
             f_stop, t_stop = get_stop_name(f_id) or "정류장", get_stop_name(t_id) or "정류장"
             c_rid = str(get_val(leg, ['route_id']))
@@ -283,7 +290,10 @@ def get_all_detailed_paths(trip_legs, departure_time):
                 r_str = ", ".join(b_names) if b_names else (get_route_name(c_rid) or '대중교통')
             else:
                 r_str = get_route_name(c_rid) or '대중교통'
-            segs.append(f"{wait_str}[{mode_lbl}][{r_str}] : {f_stop} → {t_stop} : {dur}분")
+            
+            # [수정됨] 이동 정보에는 순수 이동 시간만 표기
+            segs.append(f"[{mode_lbl}][{r_str}] : {f_stop} → {t_stop} : {ride_time}분")
+            
         return segs
 
     # 3. 경로 옵션 비교 및 선정 (수정된 로직)
@@ -705,9 +715,9 @@ if __name__ == "__main__":
             print(separator)
 
             for t in timeline:
-                if t.get('transit'):
+                if t.get('transit_to_here'):
                     # 리스트 형태의 경로를 화살표로 연결하여 출력
-                    path_str = " -> ".join([s for s in t['transit']])
+                    path_str = " -> ".join([s for s in t['transit_to_here']])
                     print(f"  [TRANSIT] {path_str}")
                 print(f"  [{t['time']}] {t['name']} ({t['category']})")
             
