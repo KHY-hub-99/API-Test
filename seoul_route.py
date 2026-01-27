@@ -265,7 +265,7 @@ def get_all_detailed_paths(trip_legs, departure_time):
             raw_mode = str(leg[mode_col]).upper()
             dur = max(1, duration_to_minutes(get_val(leg, ['travel_time', 'duration'], 0)))
             wait = duration_to_minutes(get_val(leg, ['wait_time', 'wait'], 0))
-            wait_str = f"(대기 {wait}분) " if wait > 0 else ""
+            wait_str = f"대기 | {wait}분 -> " if wait > 0 else ""
 
             if 'WALK' in raw_mode:
                 segs.append(f"도보 : {dur}분")
@@ -707,7 +707,7 @@ if __name__ == "__main__":
             for t in timeline:
                 if t.get('transit'):
                     # 리스트 형태의 경로를 화살표로 연결하여 출력
-                    path_str = " -> ".join([s.replace(" : ", " (") + ")" for s in t['transit']])
+                    path_str = " -> ".join([s for s in t['transit']])
                     print(f"  [TRANSIT] {path_str}")
                 print(f"  [{t['time']}] {t['name']} ({t['category']})")
             
