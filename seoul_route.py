@@ -1,6 +1,11 @@
 import os
-os.environ["JAVA_OPTS"] = "-Xmx8G"
+import multiprocessing
+
+available_cores = multiprocessing.cpu_count()
+NUM_CORES_TO_USE = available_cores 
+print(f"⚙️  설정된 사용 코어 수: {NUM_CORES_TO_USE}개")
 os.environ["JAVA_HOME"] = r"C:\Program Files\Java\jdk-21.0.10"
+os.environ["JAVA_OPTS"] = f"-Xmx8G -Djava.util.concurrent.ForkJoinPool.common.parallelism={NUM_CORES_TO_USE}"
 
 from google import genai
 import zipfile
@@ -14,8 +19,8 @@ from ortools.constraint_solver import routing_enums_pb2, pywrapcp
 import time
 import re
 from r5py import TransportNetwork, TravelTimeMatrix, DetailedItineraries, TransportMode
-import concurrent.futures
 import pickle
+from concurrent.futures import ThreadPoolExecutor
 
 # ============================================================
 # 1. 환경 설정 및 전역 상수
@@ -108,29 +113,64 @@ def extract_json(text):
 # 3. 교통 데이터 로드 (GTFS & OSM)
 # ============================================================
 
-# 3-1. TransportNetwork (r5py)
+# 3-1. TransportNetwork (기존 유지)
 pickle_path = "./data/seoul_tn_cached.pkl"
 if os.path.exists(pickle_path):
-    print(f"📦 Pickle 파일 로드: {pickle_path}")
-    start_load = time.time()
+    print(f"📦 TransportNetwork 로드 중...")
     transport_network = TransportNetwork.__new__(TransportNetwork)
     transport_network._transport_network = TransportNetwork._load_pickled_transport_network(self=TransportNetwork, path=pickle_path)
-    print(f"⏱ 로드 완료: {round(time.time() - start_load, 2)}초")
 else:
-    print("🚀 TransportNetwork 생성 중... (시간 소요)")
-    start_tn = time.time()
+    print("🚀 TransportNetwork 생성 중...")
     transport_network = TransportNetwork(osm_file, gtfs_files)
     transport_network._save_pickled_transport_network(path=pickle_path, transport_network=transport_network)
-    print(f"⏱ 생성 완료: {round(time.time() - start_tn, 2)}초")
 
-# 3-2. Stops 로드 & 매핑
-print("🚏 정류장 데이터 로드 중...")
-with zipfile.ZipFile(gtfs_files[0]) as z:
-    with z.open("stops.txt") as f:
-        stops_df = pd.read_csv(f, dtype={'stop_id': str})
+# 3-2 & 3-3. 메타데이터(Stop/Route) 고속 로드 (Pickle 적용)
+meta_cache_path = "./data/metadata_cache.pkl"
 
-STOP_ID_TO_NAME = {str(row['stop_id']).strip(): str(row['stop_name']).strip() for _, row in stops_df.iterrows()}
+if os.path.exists(meta_cache_path):
+    print("⚡ 메타데이터 캐시 로드 중...")
+    with open(meta_cache_path, "rb") as f:
+        meta_data = pickle.load(f)
+        STOP_ID_TO_NAME = meta_data["stops"]
+        ROUTE_ID_TO_NAME = meta_data["routes"]
+        STOP_ROUTE_MAP = meta_data["stop_route_map"]
+else:
+    print("🐢 메타데이터 생성 중 (최초 1회만 느림)...")
+    # Stops
+    with zipfile.ZipFile(gtfs_files[0]) as z:
+        with z.open("stops.txt") as f:
+            stops_df = pd.read_csv(f, dtype={'stop_id': str})
+    STOP_ID_TO_NAME = {str(row['stop_id']).strip(): str(row['stop_name']).strip() for _, row in stops_df.iterrows()}
+    
+    # Routes
+    with zipfile.ZipFile(gtfs_files[0]) as z:
+        with z.open("routes.txt") as f:
+            routes_df = pd.read_csv(f)
+    ROUTE_ID_TO_NAME = dict(zip(routes_df["route_id"].astype(str), routes_df["route_short_name"].astype(str)))
+    
+    # Stop-Route Map
+    try:
+        with zipfile.ZipFile(gtfs_files[0]) as z:
+            with z.open("trips.txt") as f:
+                trips = pd.read_csv(f, usecols=["route_id", "trip_id"])
+            with z.open("stop_times.txt") as f:
+                stop_times = pd.read_csv(f, usecols=["trip_id", "stop_id"], dtype={"stop_id": str})
+        merged = stop_times.merge(trips, on="trip_id")[["stop_id", "route_id"]].drop_duplicates()
+        grouped = merged.groupby("stop_id")["route_id"].apply(set)
+        STOP_ROUTE_MAP = grouped.to_dict()
+    except Exception as e:
+        print(f"⚠️ 매핑 실패: {e}")
+        STOP_ROUTE_MAP = {}
 
+    # 캐시 저장
+    with open(meta_cache_path, "wb") as f:
+        pickle.dump({
+            "stops": STOP_ID_TO_NAME,
+            "routes": ROUTE_ID_TO_NAME,
+            "stop_route_map": STOP_ROUTE_MAP
+        }, f)
+
+# Helper 함수들 (기존 유지)
 def get_stop_name(stop_id):
     if pd.isna(stop_id): return None
     safe_id = str(stop_id).strip()
@@ -140,72 +180,14 @@ def get_stop_name(stop_id):
     if not name and len(safe_id) < 5: name = STOP_ID_TO_NAME.get(safe_id.zfill(5))
     return name
 
-# 3-3. Routes & Types 로드 (간선/지선 필터링용)
-ROUTE_TYPE_MAP = {
-    11: "간선", 12: "지선", 13: "순환", 14: "광역", 15: "마을",
-    3: "버스", 2: "지하철", 109: "지하철"
-}
-
-def get_route_type_str(type_code):
-    return ROUTE_TYPE_MAP.get(type_code, "")
-
-print("🚌 노선 데이터 로드 중...")
-with zipfile.ZipFile(gtfs_files[0]) as z:
-    with z.open("routes.txt") as f:
-        routes_df = pd.read_csv(f)
-
-# ID -> 이름
-ROUTE_ID_TO_NAME = dict(zip(routes_df["route_id"].astype(str), routes_df["route_short_name"].astype(str)))
-# ID -> 타입 (숫자)
-ROUTE_ID_TO_TYPE = dict(zip(routes_df["route_id"].astype(str), routes_df["route_type"].fillna(3).astype(int)))
-
 def get_route_name(route_id):
     if pd.isna(route_id): return None
     try: safe_id = str(int(float(route_id)))
     except: safe_id = str(route_id)
     return ROUTE_ID_TO_NAME.get(safe_id)
 
-# 3-4. 정류장별 노선 매핑 (병렬 노선 탐색용)
-STOP_ROUTE_MAP = {}
-map_pickle_path = "./data/stop_route_map.pkl"
-
-# [수정] 캐시 파일이 있으면 로드하고 끝냄, 없으면 생성함
-if os.path.exists(map_pickle_path):
-    print(f"📦 STOP_ROUTE_MAP 캐시 로드 중...")
-    start_load = time.time()
-    try:
-        with open(map_pickle_path, 'rb') as f:
-            STOP_ROUTE_MAP = pickle.load(f)
-        print(f"✅ 로드 완료: {round(time.time() - start_load, 2)}초")
-    except Exception as e:
-        print(f"⚠️ 캐시 로드 실패, 재생성 시도: {e}")
-        # 로드 실패 시 아래의 생성 로직이 실행되도록 처리
-else:
-    try:
-        print("🔄 STOP_ROUTE_MAP 캐시 없음. 데이터 생성 중...")
-        start_map = time.time()
-        
-        with zipfile.ZipFile(gtfs_files[0]) as z:
-            with z.open("trips.txt") as f:
-                trips = pd.read_csv(f, usecols=["route_id", "trip_id"])
-            with z.open("stop_times.txt") as f:
-                stop_times = pd.read_csv(f, usecols=["trip_id", "stop_id"], dtype={"stop_id": str})
-        
-        # 병합 및 중복 제거 최적화
-        merged = stop_times.merge(trips, on="trip_id")[["stop_id", "route_id"]].drop_duplicates()
-        grouped = merged.groupby("stop_id")["route_id"].apply(set)
-        STOP_ROUTE_MAP = grouped.to_dict()
-        
-        # [생성 완료 후 저장]
-        with open(map_pickle_path, 'wb') as f:
-            pickle.dump(STOP_ROUTE_MAP, f)
-            
-        print(f"✅ 매핑 완료 및 캐시 저장 ({round(time.time() - start_map, 2)}초)")
-    except Exception as e:
-        print(f"⚠️ 정류장 매핑 실패: {e}")
-
 # ============================================================
-# 4. 경로 계산 및 상세화 (r5py)
+# 4. 경로 계산 및 상세화 (r5py) - [방법 2: 정확도 최우선 적용]
 # ============================================================
 def get_r5py_matrix(nodes, departure_time):
     valid_nodes = [n for n in nodes if n["lat"] is not None]
@@ -239,21 +221,10 @@ def get_all_detailed_paths(trip_legs, departure_time):
     path_map = {}
     origins_list, dests_list = [], []
 
-    # 1. 근거리 도보 필터링 (기존 동일)
+    # 1. 경로 요청 목록 생성
     for start_node, end_node in trip_legs:
         if start_node['id'] == end_node['id']: continue
         
-        dist_val = haversine(start_node["lat"], start_node["lng"], end_node["lat"], end_node["lng"])
-        approx_min = dist_val * 15
-        if approx_min <= dynamic_walk_threshold(dist_val):
-            path_info = [f"도보 : {round(approx_min)}분"]
-            # 근거리는 최단/최소가 의미가 없으므로 동일하게 설정
-            path_map[(start_node['id'], end_node['id'])] = {
-                "fastest": path_info, 
-                "min_transfer": path_info
-            }
-            continue
-
         cache_key = make_cache_key(start_node, end_node, departure_time)
         if cache_key in DETAILED_PATH_CACHE:
             path_map[(start_node['id'], end_node['id'])] = DETAILED_PATH_CACHE[cache_key]
@@ -264,7 +235,7 @@ def get_all_detailed_paths(trip_legs, departure_time):
 
     if not origins_list: return path_map
 
-    # 2. r5py 상세 경로 요청 (기존 동일)
+    # 2. r5py 상세 경로 요청
     origins_gdf = gpd.GeoDataFrame(origins_list, geometry=gpd.points_from_xy([n['lng'] for n in origins_list], [n['lat'] for n in origins_list]), crs="EPSG:4326")
     origins_gdf["id"] = [n["id"] for n in origins_list]
     dests_gdf = gpd.GeoDataFrame(dests_list, geometry=gpd.points_from_xy([n['lng'] for n in dests_list], [n['lat'] for n in dests_list]), crs="EPSG:4326")
@@ -287,12 +258,15 @@ def get_all_detailed_paths(trip_legs, departure_time):
             if c in row.index and pd.notna(row[c]): return str(row[c]).strip()
         return default
 
-    # 세그먼트 파싱 내부 함수 (기존 동일)
+    # 세그먼트 파싱 내부 함수 (대기 시간 포함)
     def parse_route_to_segments(route_df):
         segs = []
         for _, leg in route_df.iterrows():
             raw_mode = str(leg[mode_col]).upper()
             dur = max(1, duration_to_minutes(get_val(leg, ['travel_time', 'duration'], 0)))
+            wait = duration_to_minutes(get_val(leg, ['wait_time', 'wait'], 0))
+            wait_str = f"(대기 {wait}분) " if wait > 0 else ""
+
             if 'WALK' in raw_mode:
                 segs.append(f"도보 : {dur}분")
                 continue
@@ -309,43 +283,56 @@ def get_all_detailed_paths(trip_legs, departure_time):
                 r_str = ", ".join(b_names) if b_names else (get_route_name(c_rid) or '대중교통')
             else:
                 r_str = get_route_name(c_rid) or '대중교통'
-            segs.append(f"[{mode_lbl}][{r_str}] : {f_stop} → {t_stop} : {dur}분")
+            segs.append(f"{wait_str}[{mode_lbl}][{r_str}] : {f_stop} → {t_stop} : {dur}분")
         return segs
 
-    # 3. 경로 옵션 비교 및 선정 (수정됨)
+    # 3. 경로 옵션 비교 및 선정 (수정된 로직)
     for (from_id, to_id), group in computer.groupby(['from_id', 'to_id']):
         options_data = []
         for _, opt in group.groupby("option"):
             t_min = sum(max(1, duration_to_minutes(get_val(leg, ['travel_time', 'duration'], 0))) for _, leg in opt.iterrows())
+            # transfers: 대중교통 탑승 횟수 (0이면 순수 도보)
             t_count = sum(1 for _, leg in opt.iterrows() if 'WALK' not in str(leg[mode_col]).upper())
             options_data.append({"route": opt, "time": t_min, "transfers": t_count})
 
         if not options_data: continue
 
-        # [최단 시간] 시간 우선, 같으면 환승 적은 순
+        # [A] 최단 시간 (Fastest) - 기존 동일
         fastest_opt = min(options_data, key=lambda x: (x['time'], x['transfers']))
-        
-        # [최소 환승] 
-        # 환승 횟수 순으로 정렬 (0회 환승은 보통 장거리 도보임)
-        sorted_by_transfer = sorted(options_data, key=lambda x: (x['transfers'], x['time']))
-        
         result_entry = {
             "fastest": parse_route_to_segments(fastest_opt['route'])
         }
 
-        # 옵션이 2개 이상인 경우, 0회 환승(도보) 다음의 '진짜' 대중교통 경로를 min_transfer로 사용
-        if len(sorted_by_transfer) > 1:
-            min_trans_opt = sorted_by_transfer[1]
-            result_entry["min_transfer"] = parse_route_to_segments(min_trans_opt['route'])
+        # [B] 최소 환승 (Min Transfer) - 로직 변경: "도보 vs 대중교통 승자 독식"
+        
+        # 1. 순수 도보 옵션 찾기 (탑승 횟수 0)
+        walk_opts = [o for o in options_data if o['transfers'] == 0]
+        best_walk = min(walk_opts, key=lambda x: x['time']) if walk_opts else None
+
+        # 2. 대중교통 옵션 찾기 (탑승 횟수 1 이상) -> 그 중 환승 적은 순, 시간 짧은 순
+        transit_opts = [o for o in options_data if o['transfers'] > 0]
+        transit_opts.sort(key=lambda x: (x['transfers'], x['time']))
+        best_transit = transit_opts[0] if transit_opts else None
+
+        # 3. 승자 결정 (시간 비교)
+        winner_opt = None
+        if best_walk and best_transit:
+            # 도보가 대중교통(대기포함)보다 빠르거나 같으면 -> 도보 선택
+            if best_walk['time'] <= best_transit['time']:
+                winner_opt = best_walk
+            else:
+                winner_opt = best_transit
+        elif best_transit:
+            winner_opt = best_transit
         else:
-            # 옵션이 하나뿐이라면 최단 시간과 동일하게 처리
-            result_entry["min_transfer"] = result_entry["fastest"]
+            winner_opt = best_walk
+
+        result_entry["min_transfer"] = parse_route_to_segments(winner_opt['route'])
 
         DETAILED_PATH_CACHE[make_cache_key({"id":from_id}, {"id":to_id}, departure_time)] = result_entry
         path_map[(int(from_id), int(to_id))] = result_entry
 
     return path_map
-
 # ============================================================
 # 5. 노드 빌더 & 최적화 (OR-Tools)
 # ============================================================
@@ -470,7 +457,6 @@ def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_
     search_params = pywrapcp.DefaultRoutingSearchParameters()
     search_params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
     search_params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
-    search_params.time_limit.seconds = 1
 
     solution = routing.SolveWithParameters(search_params)
     if not solution: return []
@@ -658,31 +644,59 @@ if __name__ == "__main__":
 
     # 6. 최적화 실행 (Day loop)
     plans = result["plans"]
-    current_date = start
     day_keys = list(plans.keys())
 
-    for i, day_key in enumerate(day_keys):
-        print(f"\n📅 {day_key} ({current_date.strftime('%Y-%m-%d')}) 최적화 진행...")
+    print(f"\n🚀 병렬 최적화 시작: {len(day_keys)}일치 일정을 동시에 계산합니다.")
+    start_total_opt = time.time()
+
+    # [내부 함수] 병렬 처리를 위한 래퍼 함수
+    def process_day_wrapper(args):
+        day_key, date_obj, is_first, is_last = args
         
-        todays_start = first_day_start_str if i == 0 else default_start_str
-        todays_end = last_day_end_str if i == len(day_keys)-1 else default_end_str
+        todays_start = first_day_start_str if is_first else default_start_str
+        todays_end = last_day_end_str if is_last else default_end_str
+        current_date_str = date_obj.strftime("%Y-%m-%d")
         
-        start_opt_time = time.time()
-        day_results = optimize_day(
+        print(f"   ▶ {day_key} 최적화 시작...")
+        
+        # 실제 최적화 수행
+        day_res = optimize_day(
             places=plans[day_key]["route"],
             restaurants=plans[day_key]["restaurants"],
-            fixed_events=get_fixed_events_for_day(FIXED_EVENTS, current_date.strftime("%Y-%m-%d")),
+            fixed_events=get_fixed_events_for_day(FIXED_EVENTS, current_date_str),
             start_time_str=todays_start,
-            target_date_str=current_date.strftime("%Y-%m-%d"),
+            target_date_str=current_date_str,
             end_time_str=todays_end
         )
-        print(f"⏱ {day_key} 최적화 완료: {round(time.time() - start_opt_time, 2)}초")
+        return day_key, day_res
+
+    # 6-1. 병렬 실행 인자(Task) 준비
+    tasks = []
+    curr = start
+    for i, day_key in enumerate(day_keys):
+        tasks.append((day_key, curr, i==0, i==len(day_keys)-1))
+        curr += timedelta(days=1)
+
+    # 6-2. ThreadPoolExecutor로 병렬 실행
+    processed_results = {}
+
+    with ThreadPoolExecutor(max_workers=NUM_CORES_TO_USE) as executor:
+        for day_key, day_res in executor.map(process_day_wrapper, tasks):
+            processed_results[day_key] = day_res
+            print(f"   ✅ {day_key} 완료")
+
+    print(f"⏱ 전체 최적화 완료: {round(time.time() - start_total_opt, 2)}초")
     
-        # [수정] 여기서부터는 for 루프 내부(들여쓰기 유지)에 있어야 합니다.
-        # 각 날짜별로 계산된 결과를 JSON 객체에 저장
-        result["plans"][day_key]["timelines"] = day_results
+    # 3. 결과 취합 및 화면 출력
+    curr = start
+    for i, day_key in enumerate(day_keys):
+        # 결과 저장
+        result["plans"][day_key]["timelines"] = processed_results[day_key]
+        day_results = processed_results[day_key]
         
-        # 각 날짜별로 화면 출력
+        print(f"\n📅 {day_key} ({curr.strftime('%Y-%m-%d')})")
+
+        # 두 가지 버전(최단 시간, 최소 환승) 모두 출력
         for ver_key, label in [("fastest_version", "최단 시간"), ("min_transfer_version", "최소 환승")]:
             timeline = day_results[ver_key]
             
@@ -699,8 +713,8 @@ if __name__ == "__main__":
             
             print(separator)
 
-        # 다음 날짜로 넘어감 (루프 내부)
-        current_date += timedelta(days=1)
+        # 날짜 카운터 증가
+        curr += timedelta(days=1)
 
     # 7. 모든 루프가 끝난 후 최종 파일 저장 (루프 외부)
     with open("result_timeline.json", "w", encoding="utf-8") as f:
