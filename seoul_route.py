@@ -722,8 +722,8 @@ if __name__ == "__main__":
     if available_cores >= days * 2:
         available_cores = days * 2
     else:
-        available_cores = available_cores
-        
+        available_cores = available_cores - 2
+
     print(f"⚙️ 최대 {available_cores}개 코어로 병렬 처리 중...")
 
     with ThreadPoolExecutor(max_workers=available_cores) as executor:
