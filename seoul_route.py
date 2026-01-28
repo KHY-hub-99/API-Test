@@ -573,24 +573,29 @@ def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_
 # 6. 메인 실행부 (통합)
 # ============================================================
 if __name__ == "__main__":
-    # # 1. 엑셀 및 기본 정보 로드
-    # print("📂 장소 데이터 로드 중 (places_3000.xlsx)...")
-    # try:
-    #     df = pd.read_excel("places_3000.xlsx")
-    # except FileNotFoundError:
-    #     print("❌ 'places_3000.xlsx' 파일이 없습니다.")
-    #     exit()
+    # 1. 엑셀 및 기본 정보 로드
+    print("📂 장소 데이터 로드 중...")
+    try:
+        df = pd.read_excel("./data/place_전체_통합.xlsx")
+        df.columns = ["category", "name", "place_id", "area", "lat", "lng"]
+    except FileNotFoundError:
+        print("❌ 'places_전체_통합.xlsx' 파일이 없습니다.")
+        exit()
 
-    # area = input("여행할 지역을 입력하세요 (예: 종로구): ")
+    area = input("여행할 지역을 입력하세요 (예: 종로구): ")
     
-    # # 2. 장소 필터링
-    # filtered_spot = df[(df["area"] == f"{area}") & (df["category"] != "식당")][["name", "lat", "lng"]]
-    # filtered_restaurant = df[(df["area"] == f"{area}") & (df["category"] == "식당")][["name", "lat", "lng"]]
-    # filtered_accom = df[(df["area"] == f"{area}") & (df["category"] == "숙박")][["name", "lat", "lng"]]
+    # 2. 장소 필터링
+    area_mask = df["area"].str.contains(area, na=False)
 
-    # places = filtered_spot.to_dict(orient="records")
-    # restaurants = filtered_restaurant.to_dict(orient="records")
-    # accommodations = filtered_accom.to_dict(orient="records")
+    filtered_spot = df[area_mask & (df["category"] != "식당") & (df["category"] != "숙박")][["name", "lat", "lng"]]
+
+    filtered_restaurant = df[area_mask & (df["category"] == "식당")][["name", "lat", "lng"]]
+
+    filtered_accom = df[area_mask & (df["category"] == "숙박")][["name", "lat", "lng"]]
+
+    places = filtered_spot.to_dict(orient="records")
+    restaurants = filtered_restaurant.to_dict(orient="records")
+    accommodations = filtered_accom.to_dict(orient="records")
 
     # 3. 날짜 입력
     start_date = input("여행 시작 일자 (예: 2026-01-20): ")
@@ -601,68 +606,68 @@ if __name__ == "__main__":
     days = (end - start).days + 1
     print(f"총 여행 일수: {days}일")
 
-    # # 4. Gemini API 호출 (1차 계획 생성)
-    # schema = """
-    # {
-    #   "plans": {
-    #     "day1": {
-    #       "route": [
-    #         {"name": "...", "category": "...", "lat": 0.0, "lng": 0.0}
-    #       ],
-    #       "restaurants": [
-    #         {"name": "...", "category": "식당", "lat": 0.0, "lng": 0.0}
-    #       ],
-    #       "accommodations": [
-    #         {"name": "...", "category": "숙박", "lat": 0.0, "lng": 0.0}
-    #       ]
-    #     }
-    #   }
-    # }
-    # """
+    # 4. Gemini API 호출 (1차 계획 생성)
+    schema = """
+    {
+      "plans": {
+        "day1": {
+          "route": [
+            {"name": "...", "category": "...", "lat": 0.0, "lng": 0.0}
+          ],
+          "restaurants": [
+            {"name": "...", "category": "식당", "lat": 0.0, "lng": 0.0}
+          ],
+          "accommodations": [
+            {"name": "...", "category": "숙박", "lat": 0.0, "lng": 0.0}
+          ]
+        }
+      }
+    }
+    """
     
-    # system_prompt = f"""
-    # 너는 서울 여행 장소 추천기다. 반드시 아래 JSON 스키마 형식으로만 출력한다.
-    # {schema}
-    # 규칙:
-    # - 입력된 days 만큼 day1, day2, ... 생성
-    # - 여행 시작 일자 : {start_date}, 여행 종료 일자 : {end_date}
-    # - 매일 관광지 5곳 + 식당 2곳 구성
-    # - route에는 places 목록에서만 선택
-    # - restaurants에는 restaurants 목록에서만 선택
-    # - accommodations에는 accommodations 목록에서만 선택
-    # - route는 이동 동선을 고려하여 방문 순서 최적화
-    # - restaurants는 해당 day의 마지막 관광지와 가까운 순서로 2곳 선택
-    # - accommodations는 해당 day의 마지막 관광지와 가까운 순서로 1곳 선택
-    # - 마지막 날에는 accommodations 포함하지 않음
-    # - 설명 문장은 출력하지 않는다
-    # - 반드시 JSON만 출력한다
-    # """
+    system_prompt = f"""
+    너는 서울 여행 장소 추천기다. 반드시 아래 JSON 스키마 형식으로만 출력한다.
+    {schema}
+    규칙:
+    - 입력된 days 만큼 day1, day2, ... 생성
+    - 여행 시작 일자 : {start_date}, 여행 종료 일자 : {end_date}
+    - 매일 관광지 5곳 + 식당 2곳 구성
+    - route에는 places 목록에서만 선택
+    - restaurants에는 restaurants 목록에서만 선택
+    - accommodations에는 accommodations 목록에서만 선택
+    - route는 이동 동선을 고려하여 방문 순서 최적화
+    - restaurants는 해당 day의 마지막 관광지와 가까운 순서로 2곳 선택
+    - accommodations는 해당 day의 마지막 관광지와 가까운 순서로 1곳 선택
+    - 마지막 날에는 accommodations 포함하지 않음
+    - 설명 문장은 출력하지 않는다
+    - 반드시 JSON만 출력한다
+    """
 
-    # user_prompt = {
-    #     "days": days,
-    #     "start_location": {"lat": 37.5547, "lng": 126.9706},
-    #     "places": places[:6 * days * 3],
-    #     "restaurants": restaurants[:3 * days * 3],
-    #     "accommodations": accommodations[:days * 3]
-    # }
+    user_prompt = {
+        "days": days,
+        "start_location": {"lat": 37.5547, "lng": 126.9706},
+        "places": places[:6 * days * 4],
+        "restaurants": restaurants[:3 * days * 4],
+        "accommodations": accommodations[:days * 4]
+    }
 
-    # print("🤖 Gemini가 초기 계획을 생성하고 있습니다...")
-    # prompt = system_prompt + "\n\n" + json.dumps(user_prompt, ensure_ascii=False)
+    print("🤖 Gemini가 초기 계획을 생성하고 있습니다...")
+    prompt = system_prompt + "\n\n" + json.dumps(user_prompt, ensure_ascii=False)
     
-    # start_time = time.time()
-    # response = client.models.generate_content(model="gemini-2.5-flash-lite", contents=prompt)
-    # print(f"⏱ Gemini 응답 시간: {round(time.time() - start_time, 3)}초")
+    start_time = time.time()
+    response = client.models.generate_content(model="gemini-2.5-flash-lite", contents=prompt)
+    print(f"⏱ Gemini 응답 시간: {round(time.time() - start_time, 3)}초")
 
-    # try:
-    #     result = extract_json(response.text)
-    #     # result.json 저장 (백업용)
-    #     with open("result.json", "w", encoding="utf-8") as f:
-    #         json.dump(result, f, ensure_ascii=False, indent=2)
-    # except Exception as e:
-    #     print(f"❌ JSON 파싱 실패: {e}")
-    #     exit()
+    try:
+        result = extract_json(response.text)
+        # result.json 저장 (백업용)
+        with open("result.json", "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"❌ JSON 파싱 실패: {e}")
+        exit()
 
-    result = json.load(open("result.json", "r", encoding="utf-8"))
+    # result = json.load(open("result.json", "r", encoding="utf-8"))
 
     # 5. 세부 일정 설정
     first_day_start_str = input("여행 첫날 시작 시간 (예: 14:00) : ").strip() or "10:00"
