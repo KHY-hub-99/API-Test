@@ -2,7 +2,7 @@ import os
 import multiprocessing
 
 available_cores = multiprocessing.cpu_count()
-JAVA_PARALLELISM = 2
+JAVA_PARALLELISM = available_cores
 if available_cores > JAVA_PARALLELISM:
     JAVA_PARALLELISM = JAVA_PARALLELISM
 else:
