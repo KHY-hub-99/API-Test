@@ -80,7 +80,7 @@ def approx_walk_minutes(start, end):
     if not start or not end or start.get("lat") is None or end.get("lat") is None:
         return FALLBACK_MOVE_MIN
     dist_km = haversine(start["lat"], start["lng"], end["lat"], end["lng"])
-    return dist_km * 12
+    return dist_km * 15
 
 def dynamic_walk_threshold(dist_km):
     if dist_km < 0.6: return WALK_ONLY_THRESHOLD_MAX
@@ -451,7 +451,7 @@ def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_
             # 고정일정 이동시간 보정
             if (nodes[i]["type"]=="fixed" or nodes[j]["type"]=="fixed"):
                 if not (nodes[i]["type"]=="depot" and nodes[j]["type"]=="fixed"):
-                    val = max(val, 20)
+                    val = max(val, 30)
             
             time_matrix[i][j] = nodes[i]["stay"] + int(val)
 
@@ -536,7 +536,7 @@ def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_
                         transit_info = [f"도보 : {FALLBACK_MOVE_MIN}분"]
                     else:
                         dist = haversine(prev['lat'], prev['lng'], node['lat'], node['lng'])
-                        travel_min = int(dist * 12)
+                        travel_min = int(dist * 15)
                         transit_info = [f"도보 : {travel_min}분"]
 
             if node["type"] == "fixed":
