@@ -226,10 +226,15 @@ def get_r5py_matrix(nodes, departure_time):
 
 
 def make_cache_key(start_node, end_node, departure_time):
-    # start_node/end_node는 dict 혹은 id 형태가 들어올 수 있음
-    s_id = start_node.get("id") if isinstance(start_node, dict) else start_node
-    e_id = end_node.get("id") if isinstance(end_node, dict) else end_node
-    return (s_id, e_id, int(departure_time.hour))
+    # 수정 전: ID만 사용 -> 날짜가 달라도 ID가 같으면 충돌 발생
+    # return (s_id, e_id, int(departure_time.hour))
+
+    # 수정 후: '장소 이름'을 포함하여 유일성 보장
+    s_name = start_node.get("name", str(start_node.get("id")))
+    e_name = end_node.get("name", str(end_node.get("id")))
+    
+    # 고정 일정 등의 경우 좌표가 없을 수 있으므로 이름 기반으로 구분
+    return (s_name, e_name, int(departure_time.hour))
 
 
 def get_all_detailed_paths(trip_legs, departure_time):
@@ -489,7 +494,9 @@ def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_
             routing.AddDisjunction([index], penalty)
 
     search_params = pywrapcp.DefaultRoutingSearchParameters()
-    search_params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
+    # search_params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+    # search_params.time_limit.seconds = 1
+    # search_params.log_search = False
 
     solution = routing.SolveWithParameters(search_params)
     if not solution: return []
