@@ -2,11 +2,7 @@ import os
 import multiprocessing
 
 available_cores = multiprocessing.cpu_count()
-JAVA_PARALLELISM = available_cores
-if available_cores > JAVA_PARALLELISM:
-    JAVA_PARALLELISM = JAVA_PARALLELISM
-else:
-    JAVA_PARALLELISM = available_cores
+JAVA_PARALLELISM = 1
 print(f"⚙️  설정된 사용 코어 수: {JAVA_PARALLELISM}개")
 os.environ["JAVA_HOME"] = r"C:\Program Files\Java\jdk-21.0.10"
 os.environ["JAVA_OPTS"] = f"-Xmx8G -Djava.util.concurrent.ForkJoinPool.common.parallelism={JAVA_PARALLELISM}"
@@ -722,8 +718,10 @@ if __name__ == "__main__":
 
     # 6-2. ThreadPoolExecutor로 병렬 실행
     processed_results = {}
+    
+    print(f"⚙️ 최대 {available_cores}개 코어로 병렬 처리 중...")
 
-    with ThreadPoolExecutor(max_workers=JAVA_PARALLELISM) as executor:
+    with ThreadPoolExecutor(max_workers=available_cores) as executor:
         for day_key, day_res in executor.map(process_day_wrapper, tasks):
             processed_results[day_key] = day_res
             print(f"   ✅ {day_key} 완료")
