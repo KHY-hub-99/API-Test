@@ -40,7 +40,7 @@ FALLBACK_MOVE_MIN = 30
 WALK_ONLY_THRESHOLD_MIN = 12   
 WALK_ONLY_THRESHOLD_MAX = 18   
 
-MAX_TRANSFERS = 3
+MAX_TRANSFERS = 2
 MAX_TRAVEL_TIME_MIN = 90
 
 # 시간 윈도우 설정
@@ -719,6 +719,11 @@ if __name__ == "__main__":
     # 6-2. ThreadPoolExecutor로 병렬 실행
     processed_results = {}
     
+    if available_cores >= days * 2:
+        available_cores = days * 2
+    else:
+        available_cores = available_cores
+        
     print(f"⚙️ 최대 {available_cores}개 코어로 병렬 처리 중...")
 
     with ThreadPoolExecutor(max_workers=available_cores) as executor:
