@@ -226,15 +226,17 @@ def get_r5py_matrix(nodes, departure_time):
 
 
 def make_cache_key(start_node, end_node, departure_time):
-    # 수정 전: ID만 사용 -> 날짜가 달라도 ID가 같으면 충돌 발생
-    # return (s_id, e_id, int(departure_time.hour))
-
-    # 수정 후: '장소 이름'을 포함하여 유일성 보장
+    # 1. 이름 가져오기
     s_name = start_node.get("name", str(start_node.get("id")))
     e_name = end_node.get("name", str(end_node.get("id")))
+
+    # 2. 좌표도 가져오기 (좌표가 없으면 'None' 문자열 처리)
+    s_coord = f"{start_node.get('lat')}_{start_node.get('lng')}"
+    e_coord = f"{end_node.get('lat')}_{end_node.get('lng')}"
     
-    # 고정 일정 등의 경우 좌표가 없을 수 있으므로 이름 기반으로 구분
-    return (s_name, e_name, int(departure_time.hour))
+    # 3. 이름과 좌표를 모두 섞어서 키 생성 (절대 중복 안 됨)
+    # 키 예시: ('스타벅스_37.11_127.00', '회사_37.44_127.11', 14)
+    return (f"{s_name}_{s_coord}", f"{e_name}_{e_coord}", int(departure_time.hour))
 
 
 def get_all_detailed_paths(trip_legs, departure_time):
