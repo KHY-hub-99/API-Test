@@ -12,6 +12,7 @@ from datetime import datetime
 import glob
 import os
 import dotenv
+import time
 
 dotenv.load_dotenv()
 
@@ -183,44 +184,63 @@ def load_traffic_data():
 # STEP 2: Fetch Floating Population from S-DoT API
 # ============================================
 def fetch_floating_population(start=1, end=5000):
-    """Fetch floating population data from S-DoT API"""
+    """
+    S-DoT API에서 1,000건씩 끊어서 데이터를 수집하고 합칩니다.
+    """
     print(f"\n=== Fetching Floating Population Data (유동인구 데이터 수집) ===")
-    print(f"  Requesting records {start} to {end}...")
+    print(f"  Target Range: {start} to {end}")
+    
+    all_data = []
+    current_start = start
+    batch_size = 1000  # API 제한
 
+    while current_start <= end:
+        current_end = min(current_start + batch_size - 1, end)
+        print(f"  Requesting batch: {current_start} ~ {current_end}...")
+        
+        url = f"{SDOT_API_URL}/{current_start}/{current_end}/"
 
-    url = f"{SDOT_API_URL}/{start}/{end}/"
+        try:
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
 
-    try:
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
+            root = ET.fromstring(response.content)
+            
+            # 에러 체크
+            result_code = root.find('.//CODE')
+            if result_code is not None and result_code.text != 'INFO-000':
+                print(f"  API Warning at batch {current_start}: {result_code.text}")
+                # 데이터가 없으면 루프 중단 (예: 요청 범위가 실제 데이터보다 클 때)
+                break
 
-        # Parse XML
-        root = ET.fromstring(response.content)
+            rows = root.findall('.//row')
+            if not rows:
+                break
 
-        # Check for errors
-        result_code = root.find('.//CODE')
-        if result_code is not None and result_code.text != 'INFO-000':
-            print(f"  API Error: {root.find('.//MESSAGE').text}")
-            return None
+            for row in rows:
+                all_data.append({
+                    'sensing_time': row.findtext('SENSING_TIME'),
+                    'region': row.findtext('REGION'),
+                    'district': row.findtext('AUTONOMOUS_DISTRICT'),
+                    'dong': row.findtext('ADMINISTRATIVE_DISTRICT'),
+                    'visitor_count': int(row.findtext('VISITOR_COUNT') or 0),
+                })
+            
+            # 다음 배치를 위해 인덱스 증가
+            current_start += batch_size
+            time.sleep(0.1)  # 서버 부하 방지용 짧은 대기
 
-        # Extract data
-        rows = root.findall('.//row')
-        data = []
-        for row in rows:
-            data.append({
-                'sensing_time': row.find('SENSING_TIME').text if row.find('SENSING_TIME') is not None else None,
-                'region': row.find('REGION').text if row.find('REGION') is not None else None,
-                'district': row.find('AUTONOMOUS_DISTRICT').text if row.find('AUTONOMOUS_DISTRICT') is not None else None,
-                'dong': row.find('ADMINISTRATIVE_DISTRICT').text if row.find('ADMINISTRATIVE_DISTRICT') is not None else None,
-                'visitor_count': int(row.find('VISITOR_COUNT').text) if row.find('VISITOR_COUNT') is not None else 0,
-            })
+        except Exception as e:
+            print(f"  API request failed at {current_start}: {e}")
+            break
 
-        df = pd.DataFrame(data)
-        print(f"  Fetched {len(df)} floating population records")
+    # 데이터가 하나라도 모였으면 DataFrame 생성
+    if all_data:
+        df = pd.DataFrame(all_data)
+        print(f"  ✅ Successfully fetched {len(df)} total records.")
         return df
-
-    except requests.exceptions.RequestException as e:
-        print(f"  API request failed: {e}")
+    else:
+        print("  ❌ Failed to fetch any data.")
         return None
 
 # ============================================
@@ -571,7 +591,22 @@ if __name__ == "__main__":
         exit(1)
 
     # Step 2: Fetch floating population
-    population_df = fetch_floating_population(start=1, end=5000)
+    data_dir = "./data"
+    file_name = "floating_population.xlsx"
+    file_path = os.path.join(data_dir, file_name)
+
+    if os.path.exists(file_path):
+        print(f"📂 기존 파일이 있어 로드합니다: {file_path}")
+        population_df = pd.read_excel(file_path)
+    else:
+        print("🚀 파일이 없어 API를 호출합니다...")
+        population_df = fetch_floating_population(start=1, end=5000)
+
+        if population_df is not None:
+            # ./data 폴더가 없으면 자동으로 생성 (에러 방지)
+            os.makedirs("./data", exist_ok=True) 
+            population_df.to_excel(file_path, index=False)
+            print("💾 데이터 저장 완료")
 
     # Step 3: Prepare training data
     data, location_to_num, locations = prepare_training_data(traffic_df, population_df)
