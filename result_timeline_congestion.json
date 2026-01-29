@@ -3,163 +3,165 @@
     "day1": {
       "route": [
         {
-          "name": "북서울꿈의숲",
-          "category": "공원",
-          "lat": 37.619724251,
-          "lng": 127.0445440464
+          "name": "롯데월드타워 서울스카이",
+          "category": "관광명소",
+          "lat": 37.5141653654,
+          "lng": 127.1040749597
         },
         {
-          "name": "상상톡톡 미술관",
+          "name": "롯데월드 민속박물관",
           "category": "박물관",
-          "lat": 37.619724251,
-          "lng": 127.0445440464
+          "lat": 37.5123821225,
+          "lng": 127.0976311526
         },
         {
-          "name": "오동근린공원",
+          "name": "석촌호수",
           "category": "공원",
-          "lat": 37.6295534635,
-          "lng": 127.0334142261
+          "lat": 37.5095713442,
+          "lng": 127.0979728676
         },
         {
-          "name": "오동근린공원 유아숲체험장",
+          "name": "올림픽공원",
           "category": "공원",
-          "lat": 37.6330697001,
-          "lng": 127.0322420107
+          "lat": 37.5206092598,
+          "lng": 127.1150682209
         },
         {
-          "name": "강북청소년축제 강추",
-          "category": "문화 행사",
-          "lat": 37.6321225012,
-          "lng": 127.0274174771
+          "name": "롯데월드 아쿠아리움",
+          "category": "관광명소",
+          "lat": 37.5141653654,
+          "lng": 127.1040749597
         }
       ],
       "restaurants": [
         {
-          "name": "메이린",
+          "name": "캐롤스 본점",
           "category": "음식점",
-          "lat": 37.619724251,
-          "lng": 127.0445440464
+          "lat": 37.5141653654,
+          "lng": 127.1040749597
         },
         {
-          "name": "리코",
+          "name": "바이킹스워프 롯데월드몰점",
           "category": "음식점",
-          "lat": 37.6313947898,
-          "lng": 127.0264453642
+          "lat": 37.5142459111,
+          "lng": 127.1040305171
         }
       ],
       "accommodations": [
         {
-          "name": "리치다이아몬드호텔",
+          "name": "시그니엘 서울",
           "category": "숙박",
-          "lat": 37.6476399283,
-          "lng": 127.0156236669
+          "lat": 37.5141653654,
+          "lng": 127.1040749597
         }
       ],
       "timelines": {
         "fastest_version": [
           {
-            "name": "오동근린공원",
+            "name": "석촌호수",
             "category": "공원",
-            "time": "14:34 - 15:34",
+            "time": "14:16 - 15:16",
             "transit_to_here": [],
-            "congestion": "Traffic:Medium(도봉로(쌍문역)), Crowd:Low"
+            "congestion": "Traffic:🔴, Crowd:🟢"
           },
           {
-            "name": "오동근린공원 유아숲체험장",
+            "name": "올림픽공원",
             "category": "공원",
-            "time": "15:54 - 16:54",
+            "time": "15:44 - 16:44",
             "transit_to_here": [
               "도보 : 10분",
               "대기 : 1분",
-              "[버스][1124] : 번동해모로아파트 → 북부시장입구 : 4분",
-              "도보 : 5분"
+              "[버스][3315] : 갤러리아팰리스 → 잠실역1번.11번출구 : 2분",
+              "대기 : 1분",
+              "[버스][341, 3411, N31] : 잠실역1번.11번출구 → 올림픽회관 : 7분",
+              "도보 : 1분",
+              "대기 +0분/이동 +6분"
             ],
-            "congestion": "Traffic:Medium(도봉로(쌍문역)), Crowd:Low"
+            "congestion": "Traffic:🔴, Crowd:🟢"
           },
           {
-            "name": "강북청소년축제 강추",
-            "category": "문화 행사",
-            "time": "17:09 - 18:09",
-            "transit_to_here": [
-              "도보 : 15분"
-            ],
-            "congestion": "Traffic:Medium(도봉로(쌍문역)), Crowd:High"
-          },
-          {
-            "name": "리코",
+            "name": "바이킹스워프 롯데월드몰점",
             "category": "음식점",
-            "time": "18:11 - 19:21",
+            "time": "17:04 - 18:14",
             "transit_to_here": [
-              "도보 : 2분"
+              "도보 : 3분",
+              "대기 : 1분",
+              "[버스][3319, 341, 3411, N31] : 잠실파크리오아파트상가.올림픽회관 → 신천동진주아파트 : 5분",
+              "도보 : 7분",
+              "대기 +0분/이동 +4분"
             ],
-            "congestion": "Traffic:Medium(도봉로(쌍문역)), Crowd:High"
+            "congestion": "Traffic:🔴, Crowd:🔴"
           },
           {
-            "name": "북서울꿈의숲",
-            "category": "공원",
-            "time": "19:54 - 20:54",
+            "name": "롯데월드 아쿠아리움",
+            "category": "관광명소",
+            "time": "18:17 - 19:17",
             "transit_to_here": [
-              "도보 : 5분",
-              "대기 : 3분",
-              "[버스][101, 130, 141, 148] : 수유시장.성신여대미아캠퍼스앞 → 성가복지병원 : 8분 (🚦Medium(도봉로(쌍문역))/👥Low +2분)",
-              "대기 : 1분",
-              "도보 : 2분",
-              "대기 : 1분",
-              "[버스][111] : 성가복지병원 → 장위동그린빌아파트 : 5분 (🚦High(화랑로(상월곡역))/👥Low +2분)",
-              "도보 : 4분"
+              "도보 : 3분"
             ],
-            "congestion": "Traffic:High(북부간선로), Crowd:Medium"
+            "congestion": "Traffic:🔴, Crowd:🔴"
+          },
+          {
+            "name": "롯데월드타워 서울스카이",
+            "category": "관광명소",
+            "time": "19:18 - 20:18",
+            "transit_to_here": [
+              "도보 : 1분"
+            ],
+            "congestion": "Traffic:🔴, Crowd:🟡"
           }
         ],
         "min_transfer_version": [
           {
-            "name": "오동근린공원",
+            "name": "석촌호수",
             "category": "공원",
-            "time": "14:34 - 15:34",
+            "time": "14:16 - 15:16",
             "transit_to_here": [],
-            "congestion": "Traffic:Medium(도봉로(쌍문역)), Crowd:Low"
+            "congestion": "Traffic:🔴, Crowd:🟢"
           },
           {
-            "name": "오동근린공원 유아숲체험장",
+            "name": "올림픽공원",
             "category": "공원",
-            "time": "15:54 - 16:54",
+            "time": "15:43 - 16:43",
             "transit_to_here": [
-              "도보 : 10분",
+              "도보 : 13분",
               "대기 : 1분",
-              "[버스][1124] : 번동해모로아파트 → 북부시장입구 : 4분",
-              "도보 : 5분"
+              "[버스][341, 3411, 6200, N31] : 잠실역.롯데월드 → 올림픽회관 : 7분",
+              "도보 : 1분",
+              "대기 +0분/이동 +5분"
             ],
-            "congestion": "Traffic:Medium(도봉로(쌍문역)), Crowd:Low"
+            "congestion": "Traffic:🔴, Crowd:🟢"
           },
           {
-            "name": "강북청소년축제 강추",
-            "category": "문화 행사",
-            "time": "17:09 - 18:09",
-            "transit_to_here": [
-              "도보 : 15분"
-            ],
-            "congestion": "Traffic:Medium(도봉로(쌍문역)), Crowd:High"
-          },
-          {
-            "name": "리코",
+            "name": "바이킹스워프 롯데월드몰점",
             "category": "음식점",
-            "time": "18:11 - 19:21",
+            "time": "17:03 - 18:13",
             "transit_to_here": [
-              "도보 : 2분"
+              "도보 : 3분",
+              "대기 : 1분",
+              "[버스][3319, 341, 3411, N31] : 잠실파크리오아파트상가.올림픽회관 → 신천동진주아파트 : 5분",
+              "도보 : 7분",
+              "대기 +0분/이동 +4분"
             ],
-            "congestion": "Traffic:Medium(도봉로(쌍문역)), Crowd:High"
+            "congestion": "Traffic:🔴, Crowd:🔴"
           },
           {
-            "name": "북서울꿈의숲",
-            "category": "공원",
-            "time": "20:02 - 21:02",
+            "name": "롯데월드 아쿠아리움",
+            "category": "관광명소",
+            "time": "18:16 - 19:16",
             "transit_to_here": [
-              "도보 : 5분",
-              "대기 : 1분",
-              "[버스][120] : 수유시장.성신여대미아캠퍼스앞 → 방천시장입구 : 8분 (🚦Medium(도봉로(쌍문역))/👥Low +2분)",
-              "도보 : 25분"
+              "도보 : 3분"
             ],
-            "congestion": "Traffic:High(북부간선로), Crowd:Medium"
+            "congestion": "Traffic:🔴, Crowd:🔴"
+          },
+          {
+            "name": "롯데월드타워 서울스카이",
+            "category": "관광명소",
+            "time": "19:17 - 20:17",
+            "transit_to_here": [
+              "도보 : 1분"
+            ],
+            "congestion": "Traffic:🔴, Crowd:🟡"
           }
         ]
       }
@@ -167,196 +169,164 @@
     "day2": {
       "route": [
         {
-          "name": "우이동계곡",
-          "category": "자연",
-          "lat": 37.6694622455,
-          "lng": 127.0076182199
+          "name": "서울놀이마당",
+          "category": "관광명소",
+          "lat": 37.5097129968,
+          "lng": 127.0981006298
         },
         {
-          "name": "우이동만남의광장",
-          "category": "공원",
-          "lat": 37.6618909066,
-          "lng": 127.007729537
+          "name": "롯데월드 아이스링크",
+          "category": "문화시설",
+          "lat": 37.5123821225,
+          "lng": 127.0976311526
         },
         {
-          "name": "[서울둘레길 20코스] 북한산 강북코스",
-          "category": "둘레길",
-          "lat": 37.6324804306,
-          "lng": 127.007333188
+          "name": "송파구립 예송미술관",
+          "category": "미술관",
+          "lat": 37.5026998343,
+          "lng": 127.0931984965
         },
         {
-          "name": "도선사(서울)",
-          "category": "사찰",
-          "lat": 37.6563162556,
-          "lng": 126.9911089898
+          "name": "한성백제박물관",
+          "category": "박물관",
+          "lat": 37.5154988428,
+          "lng": 127.1206650789
         },
         {
-          "name": "북한산 백운대(우이동)",
-          "category": "등산",
-          "lat": 37.6583104651,
-          "lng": 126.9909450591
+          "name": "소마미술관",
+          "category": "미술관",
+          "lat": 37.5206092598,
+          "lng": 127.1150682209
         }
       ],
       "restaurants": [
         {
-          "name": "왕의장어",
+          "name": "군산오징어 본점",
           "category": "음식점",
-          "lat": 37.6694622455,
-          "lng": 127.0076182199
+          "lat": 37.5063411468,
+          "lng": 127.0970258234
         },
         {
-          "name": "카페 산아래",
+          "name": "진성한우곱창",
           "category": "음식점",
-          "lat": 37.6668737098,
-          "lng": 127.0105041413
+          "lat": 37.4947623594,
+          "lng": 127.1205740095
         }
       ],
       "accommodations": [],
       "timelines": {
         "fastest_version": [
           {
-            "name": "우이동계곡",
-            "category": "자연",
+            "name": "서울놀이마당",
+            "category": "관광명소",
             "time": "10:00 - 11:00",
             "transit_to_here": [],
-            "congestion": "Traffic:Unknown, Crowd:Unknown"
+            "congestion": "Traffic:🔴, Crowd:🟢"
           },
           {
-            "name": "왕의장어",
+            "name": "군산오징어 본점",
             "category": "음식점",
-            "time": "11:01 - 12:11",
+            "time": "11:08 - 12:18",
             "transit_to_here": [
-              "도보 : 1분"
+              "도보 : 8분"
             ],
-            "congestion": "Traffic:Unknown, Crowd:Unknown"
+            "congestion": "Traffic:🔴, Crowd:🟢"
           },
           {
-            "name": "[서울둘레길 20코스] 북한산 강북코스",
-            "category": "둘레길",
-            "time": "13:01 - 14:01",
+            "name": "롯데월드 아이스링크",
+            "category": "문화시설",
+            "time": "12:39 - 13:39",
             "transit_to_here": [
-              "도보 : 15분",
+              "도보 : 4분",
               "대기 : 1분",
-              "[지하철][우이신설경전철] : 북한산우이(도선사입구) → 화계 : 6분",
-              "대기 : 1분",
-              "도보 : 2분",
-              "대기 : 3분",
-              "[버스][151] : 강북노인종합복지관 → 화계사입구.한신대학교대학원 : 2분 (🚦Medium(도봉로(쌍문역))/👥Low +1분)",
-              "도보 : 19분"
+              "[버스][3314] : 잠실119안전센터 → 잠실역.롯데월드 : 7분",
+              "도보 : 4분",
+              "대기 +0분/이동 +5분"
             ],
-            "congestion": "Traffic:Unknown, Crowd:Unknown"
+            "congestion": "Traffic:🔴, Crowd:🟢"
           },
           {
-            "name": "우이동만남의광장",
-            "category": "공원",
-            "time": "14:35 - 15:35",
+            "name": "소마미술관",
+            "category": "미술관",
+            "time": "13:55 - 14:55",
             "transit_to_here": [
-              "도보 : 12분",
-              "대기 : 1분",
-              "[버스][121] : 화계사입구.한신대학교대학원 → 수유보건지소 : 1분",
-              "대기 : 1분",
               "도보 : 1분",
-              "대기 : 1분",
-              "[버스][109] : 수유보건지소 → 영신여객차고지(우이동종점) : 9분 (🚦Medium(도봉로(쌍문역))/👥Low +2분)",
-              "도보 : 6분"
+              "대기 : 2분",
+              "[버스][341, 3411, 6200, N31] : 잠실역.롯데월드 → 올림픽회관 : 7분",
+              "도보 : 1분",
+              "대기 +0분/이동 +5분"
             ],
-            "congestion": "Traffic:Unknown, Crowd:Unknown"
+            "congestion": "Traffic:🔴, Crowd:🟢"
           },
           {
-            "name": "북한산 백운대(우이동)",
-            "category": "등산",
-            "time": "16:07 - 17:07",
+            "name": "송파구립 예송미술관",
+            "category": "미술관",
+            "time": "15:31 - 16:31",
             "transit_to_here": [
-              "도보 : 32분"
+              "도보 : 3분",
+              "대기 : 3분",
+              "[버스][340] : 잠실파크리오아파트상가.올림픽회관 → 송파구민회관구의회 : 15분",
+              "도보 : 6분",
+              "대기 +0분/이동 +9분"
             ],
-            "congestion": "Traffic:Unknown, Crowd:Unknown"
-          },
-          {
-            "name": "도선사(서울)",
-            "category": "사찰",
-            "time": "17:11 - 18:11",
-            "transit_to_here": [
-              "도보 : 4분"
-            ],
-            "congestion": "Traffic:Unknown, Crowd:Unknown"
-          },
-          {
-            "name": "카페 산아래",
-            "category": "음식점",
-            "time": "19:00 - 20:10",
-            "transit_to_here": [
-              "도보 : 49분"
-            ],
-            "congestion": "Traffic:Unknown, Crowd:Unknown"
+            "congestion": "Traffic:🔴, Crowd:🟢"
           }
         ],
         "min_transfer_version": [
           {
-            "name": "우이동계곡",
-            "category": "자연",
+            "name": "서울놀이마당",
+            "category": "관광명소",
             "time": "10:00 - 11:00",
             "transit_to_here": [],
-            "congestion": "Traffic:Unknown, Crowd:Unknown"
+            "congestion": "Traffic:🔴, Crowd:🟢"
           },
           {
-            "name": "왕의장어",
+            "name": "군산오징어 본점",
             "category": "음식점",
-            "time": "11:01 - 12:11",
+            "time": "11:08 - 12:18",
             "transit_to_here": [
-              "도보 : 1분"
+              "도보 : 8분"
             ],
-            "congestion": "Traffic:Unknown, Crowd:Unknown"
+            "congestion": "Traffic:🔴, Crowd:🟢"
           },
           {
-            "name": "[서울둘레길 20코스] 북한산 강북코스",
-            "category": "둘레길",
-            "time": "12:57 - 13:57",
+            "name": "롯데월드 아이스링크",
+            "category": "문화시설",
+            "time": "12:39 - 13:39",
             "transit_to_here": [
-              "도보 : 16분",
+              "도보 : 4분",
               "대기 : 1분",
-              "[버스][151] : 우이동도선사입구.북한산우이역 → 화계사입구.한신대학교대학원 : 11분",
-              "도보 : 18분"
+              "[버스][3314] : 잠실119안전센터 → 잠실역.롯데월드 : 7분",
+              "도보 : 4분",
+              "대기 +0분/이동 +5분"
             ],
-            "congestion": "Traffic:Unknown, Crowd:Unknown"
+            "congestion": "Traffic:🔴, Crowd:🟢"
           },
           {
-            "name": "우이동만남의광장",
-            "category": "공원",
-            "time": "14:34 - 15:34",
+            "name": "소마미술관",
+            "category": "미술관",
+            "time": "13:55 - 14:55",
             "transit_to_here": [
-              "도보 : 19분",
-              "대기 : 1분",
-              "[버스][109] : 수유보건지소 → 영신여객차고지(우이동종점) : 9분 (🚦Medium(도봉로(쌍문역))/👥Low +2분)",
-              "도보 : 6분"
+              "도보 : 1분",
+              "대기 : 2분",
+              "[버스][341, 3411, 6200, N31] : 잠실역.롯데월드 → 올림픽회관 : 7분",
+              "도보 : 1분",
+              "대기 +0분/이동 +5분"
             ],
-            "congestion": "Traffic:Unknown, Crowd:Unknown"
+            "congestion": "Traffic:🔴, Crowd:🟢"
           },
           {
-            "name": "북한산 백운대(우이동)",
-            "category": "등산",
-            "time": "16:06 - 17:06",
+            "name": "송파구립 예송미술관",
+            "category": "미술관",
+            "time": "15:31 - 16:31",
             "transit_to_here": [
-              "도보 : 32분"
+              "도보 : 3분",
+              "대기 : 3분",
+              "[버스][340] : 잠실파크리오아파트상가.올림픽회관 → 송파구민회관구의회 : 15분",
+              "도보 : 6분",
+              "대기 +0분/이동 +9분"
             ],
-            "congestion": "Traffic:Unknown, Crowd:Unknown"
-          },
-          {
-            "name": "도선사(서울)",
-            "category": "사찰",
-            "time": "17:10 - 18:10",
-            "transit_to_here": [
-              "도보 : 4분"
-            ],
-            "congestion": "Traffic:Unknown, Crowd:Unknown"
-          },
-          {
-            "name": "카페 산아래",
-            "category": "음식점",
-            "time": "18:59 - 20:09",
-            "transit_to_here": [
-              "도보 : 49분"
-            ],
-            "congestion": "Traffic:Unknown, Crowd:Unknown"
+            "congestion": "Traffic:🔴, Crowd:🟢"
           }
         ]
       }

@@ -59,9 +59,11 @@ gtfs_files = ["./data/seoul_area_gtfs.zip"]
 
 # [추가] 혼잡도 모델 관련 상수 및 가중치
 MODEL_PATH = "./model/seoul_congestion_model.pkl"
-TRAFFIC_WEIGHTS = {0: 1.0, 1: 1.2, 2: 1.5}  # Low, Medium, High (이동 시간 가중치)
-CROWD_WEIGHTS = {0: 1.0, 1: 1.1, 2: 1.3}    # Low, Medium, High (대기 시간 가중치)
-LEVEL_MAP = {0: "Low", 1: "Medium", 2: "High"} # 로그 출력을 위한 매핑
+TRAFFIC_WEIGHTS = {0: 1.0, 1: 1.3, 2: 2}  # Low, Medium, High
+CROWD_WEIGHTS = {0: 1.0, 1: 1.1, 2: 1.3}    # Low, Medium, High 
+# [수정] 이모지 매핑 (0:Low, 1:Medium, 2:High)
+EMOJI_MAP = {0: "🟢", 1: "🟡", 2: "🔴"}
+
 
 # [NEW] 제공해주신 교통 지점 좌표 데이터 (유효하지 않은 0.0 좌표 제외)
 TRAFFIC_NODE_COORDS = {
@@ -332,7 +334,7 @@ def find_nearest_traffic_node(target_lat, target_lng, max_dist_km=2.0):
 # [MODIFIED] 예측 함수 (좌표 기반 매핑 추가)
 def predict_congestion_weights(location_name, current_dt, lat=None, lng=None):
     if TRAFFIC_MODEL is None or not LOCATION_MAP:
-        return 1.0, 1.0, "Unknown", "Unknown"
+        return 1.0, 1.0, "⚪", "⚪"
 
     target_name = None
 
@@ -347,7 +349,7 @@ def predict_congestion_weights(location_name, current_dt, lat=None, lng=None):
             target_name = found_node
 
     if target_name is None:
-        return 1.0, 1.0, "Unknown", "Unknown"
+        return 1.0, 1.0, "⚪", "⚪"
 
     hour = current_dt.hour
     month = current_dt.month
@@ -389,15 +391,13 @@ def predict_congestion_weights(location_name, current_dt, lat=None, lng=None):
         t_weight = TRAFFIC_WEIGHTS.get(t_level, 1.0)
         c_weight = CROWD_WEIGHTS.get(c_level, 1.0)
         
-        t_str = LEVEL_MAP.get(t_level, "Unknown")
-        c_str = LEVEL_MAP.get(c_level, "Unknown")
+        # [수정] 이모지로 반환
+        t_emoji = EMOJI_MAP.get(t_level, "⚪")
+        c_emoji = EMOJI_MAP.get(c_level, "⚪")
         
-        if target_name != location_name:
-             t_str = f"{t_str}({target_name})" # 매핑된 정보 표시
-        
-        return t_weight, c_weight, t_str, c_str
+        return t_weight, c_weight, t_emoji, c_emoji
     except Exception as e:
-        return 1.0, 1.0, "Error", "Error"
+        return 1.0, 1.0, "⚪", "⚪"
 
 # ============================================================
 # 3. 교통 데이터 로드 (GTFS & OSM)
@@ -514,11 +514,9 @@ def get_all_detailed_paths(trip_legs, departure_time):
     path_map = {}
     origins_list, dests_list = [], []
 
-    # 1) 요청 대상 수집
     for start_node, end_node in trip_legs:
         if start_node['id'] == end_node['id']: continue
         
-        # 캐싱된 키에도 departure_time.hour가 포함되어 있으므로 시간대별 혼잡도가 캐시됨
         cache_key = make_cache_key(start_node, end_node, departure_time)
         if cache_key in DETAILED_PATH_CACHE:
             path_map[(int(start_node['id']), int(end_node['id']))] = DETAILED_PATH_CACHE[cache_key]
@@ -533,7 +531,6 @@ def get_all_detailed_paths(trip_legs, departure_time):
         origins_list.append(start_node)
         dests_list.append(end_node)
 
-    # 2) r5py 요청
     if origins_list:
         origins_gdf = gpd.GeoDataFrame(origins_list, geometry=gpd.points_from_xy([n['lng'] for n in origins_list], [n['lat'] for n in origins_list]), crs="EPSG:4326")
         origins_gdf["id"] = [n["id"] for n in origins_list]
@@ -558,11 +555,13 @@ def get_all_detailed_paths(trip_legs, departure_time):
                     if c in row.index and pd.notna(row[c]): return str(row[c]).strip()
                 return default
 
-            # [핵심 수정] 파싱 시 가중치 적용 함수
-            # [최종] 디버깅 로그 제거 및 깔끔한 출력 버전
+            # [수정] 이모지 로그가 포함된 상세 경로 생성
             def parse_route_to_segments_with_congestion(route_df, current_dt):
                 segs = []
                 total_weighted_min = 0
+                
+                total_ride_diff = 0
+                total_wait_diff = 0
 
                 for _, leg in route_df.iterrows():
                     raw_mode = str(leg[mode_col]).upper() if mode_col in leg.index else ''
@@ -573,7 +572,6 @@ def get_all_detailed_paths(trip_legs, departure_time):
                     f_id = str(get_val(leg, ['start_stop_id', 'from_stop_id']))
                     f_stop_name = get_stop_name(f_id) or "정류장"
                     
-                    # [1] 정류장 좌표 추출
                     f_lat, f_lng = None, None
                     try:
                         if 'geometry' in leg and leg['geometry']:
@@ -583,14 +581,12 @@ def get_all_detailed_paths(trip_legs, departure_time):
                     except Exception:
                         pass
                     
-                    # [2] 혼잡도 예측
-                    t_weight, c_weight, t_stat, c_stat = predict_congestion_weights(
+                    t_weight, c_weight, t_emoji, c_emoji = predict_congestion_weights(
                         f_stop_name, current_dt, lat=f_lat, lng=f_lng
                     )
                     
                     final_ride_time = ride_time
                     final_wait_time = wait_time
-                    congestion_tag = ""
 
                     is_subway = any(x in raw_mode for x in ['SUBWAY', 'RAIL', 'METRO'])
                     is_walk = 'WALK' in raw_mode
@@ -598,20 +594,15 @@ def get_all_detailed_paths(trip_legs, departure_time):
                     if is_walk:
                         pass
                     else:
-                        # [3] 지하철이 아니면(버스) 도로 혼잡도 적용
                         if not is_subway:
-                            base_penalty = 3 if t_stat == 'High' else 0
+                            base_penalty = 3 if t_emoji == '🔴' else 0
                             final_ride_time = math.ceil(ride_time * t_weight) + base_penalty
                         
                         if wait_time > 0:
                             final_wait_time = math.ceil(wait_time * c_weight)
                         
-                        diff = (final_ride_time - ride_time) + (final_wait_time - wait_time)
-                        
-                        # [4] 깔끔한 로그 출력 (좌표 제거)
-                        # 혼잡으로 인해 시간이 늘어났거나 상태가 High인 경우만 표시
-                        if diff > 0 or t_stat == 'High' or c_stat == 'High':
-                            congestion_tag = f" (🚦{t_stat}/👥{c_stat} +{int(diff)}분)"
+                        total_ride_diff += (final_ride_time - ride_time)
+                        total_wait_diff += (final_wait_time - wait_time)
 
                     if final_wait_time > 0:
                         segs.append(f"대기 : {final_wait_time}분")
@@ -631,28 +622,27 @@ def get_all_detailed_paths(trip_legs, departure_time):
                             b_names = sorted([n for n in [get_route_name(rid) for rid in common] if n])
                             if b_names: r_str = ", ".join(b_names)
 
-                        segs.append(f"[{mode_lbl}][{r_str}] : {f_stop_name} → {t_stop} : {final_ride_time}분{congestion_tag}")
+                        segs.append(f"[{mode_lbl}][{r_str}] : {f_stop_name} → {t_stop} : {final_ride_time}분")
 
                     total_weighted_min += (final_ride_time + final_wait_time)
                     current_dt += timedelta(minutes=final_ride_time + final_wait_time)
+                
+                # [수정] 이모지 기반 지연 요약 로그
+                if total_ride_diff > 0 or total_wait_diff > 0:
+                    segs.append(f"대기 +{int(total_wait_diff)}분/이동 +{int(total_ride_diff)}분")
 
                 return segs, total_weighted_min
 
-            # 3) 그룹별 옵션 분석
             for (from_id, to_id), group in computer.groupby(['from_id', 'to_id']):
                 options_data = []
                 for _, opt in group.groupby("option"):
-                    # 가중치 적용된 시간 계산
                     raw_time = sum(max(1, duration_to_minutes(get_val(leg, ['travel_time', 'duration'], 0))) for _, leg in opt.iterrows())
                     t_count = sum(1 for _, leg in opt.iterrows() if 'WALK' not in str(leg[mode_col]).upper())
                     options_data.append({"route": opt, "time": raw_time, "transfers": t_count})
 
                 if not options_data: continue
 
-                # 최적 옵션 선정 (기존 로직: 최단시간, 최소환승)
                 fastest_opt = min(options_data, key=lambda x: (x['time'], x['transfers']))
-                
-                # [수정] 선정된 경로에 대해 가중치 적용하여 문자열 생성
                 segs_fast, _ = parse_route_to_segments_with_congestion(fastest_opt['route'], departure_time)
                 result_entry = {"fastest": segs_fast}
 
@@ -1076,7 +1066,7 @@ if __name__ == "__main__":
                     path_str = " -> ".join([s for s in t['transit_to_here']])
                     print(f"  [TRANSIT] {path_str}")
                 congestion_log = t.get('congestion', 'N/A')
-                print(f"  [{t['time']}] {t['name']} ({t['category']}) - 📊 {congestion_log}")
+                print(f"  [{t['time']}] {t['name']} ({t['category']}) - {congestion_log}")
             
             print(separator)
 
