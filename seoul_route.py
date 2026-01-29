@@ -611,62 +611,62 @@ if __name__ == "__main__":
     days = (end - start).days + 1
     print(f"총 여행 일수: {days}일")
 
-    # 4. Gemini API 호출 (1차 계획 생성)
-    schema = """
-    {
-      "plans": {
-        "day1": {
-          "route": [
-            {"name": "...", "category": "...", "lat": 0.0, "lng": 0.0}
-          ],
-          "restaurants": [
-            {"name": "...", "category": "음식점", "lat": 0.0, "lng": 0.0}
-          ],
-          "accommodations": [
-            {"name": "...", "category": "숙박", "lat": 0.0, "lng": 0.0}
-          ]
-        }
-      }
-    }
-    """
+    # # 4. Gemini API 호출 (1차 계획 생성)
+    # schema = """
+    # {
+    #   "plans": {
+    #     "day1": {
+    #       "route": [
+    #         {"name": "...", "category": "...", "lat": 0.0, "lng": 0.0}
+    #       ],
+    #       "restaurants": [
+    #         {"name": "...", "category": "음식점", "lat": 0.0, "lng": 0.0}
+    #       ],
+    #       "accommodations": [
+    #         {"name": "...", "category": "숙박", "lat": 0.0, "lng": 0.0}
+    #       ]
+    #     }
+    #   }
+    # }
+    # """
     
-    system_prompt = f"""
-    너는 '서울 여행 장소 추천 전문가'이다. 반드시 제공된 데이터만을 사용하여 계획을 세운다.
-    {schema}
-    [절대 규칙]
-    1. 모든 장소의 이름, 카테고리, 좌표(lat, lng)는 입력된 데이터와 100% 일치해야 한다. 절대 값을 수정하거나 새로운 좌표를 생성하지 마라.
-    2. 'route' 배열: 오직 제공된 'places' 목록에서 5개를 선택하여 담는다.
-    3. 'restaurants' 배열: 오직 제공된 'restaurants' 목록에서 2개를 선택한다.
-    4. 'accommodations' 배열: 오직 제공된 'accommodations' 목록에서 1개를 선택한다. (마지막 날은 빈 배열 []로 출력)
-    5. 할루시네이션 방지: 목록에 없는 장소나 좌표를 출력할 경우 시스템 오류로 간주한다.
-    6. 출력 형식: 반드시 순수 JSON 데이터만 출력하며, 설명이나 추가 텍스트를 절대 포함하지 않는다.
-    """
+    # system_prompt = f"""
+    # 너는 '서울 여행 장소 추천 전문가'이다. 반드시 제공된 데이터만을 사용하여 계획을 세운다.
+    # {schema}
+    # [절대 규칙]
+    # 1. 모든 장소의 이름, 카테고리, 좌표(lat, lng)는 입력된 데이터와 100% 일치해야 한다. 절대 값을 수정하거나 새로운 좌표를 생성하지 마라.
+    # 2. 'route' 배열: 오직 제공된 'places' 목록에서 5개를 선택하여 담는다.
+    # 3. 'restaurants' 배열: 오직 제공된 'restaurants' 목록에서 2개를 선택한다.
+    # 4. 'accommodations' 배열: 오직 제공된 'accommodations' 목록에서 1개를 선택한다. (마지막 날은 빈 배열 []로 출력)
+    # 5. 할루시네이션 방지: 목록에 없는 장소나 좌표를 출력할 경우 시스템 오류로 간주한다.
+    # 6. 출력 형식: 반드시 순수 JSON 데이터만 출력하며, 설명이나 추가 텍스트를 절대 포함하지 않는다.
+    # """
 
-    user_prompt = {
-        "days": days,
-        "start_location": {"lat": 37.5547, "lng": 126.9706},
-        "places": places, # [:6 * days * 4]
-        "restaurants": restaurants, # [:3 * days * 4]
-        "accommodations": accommodations # [:days * 4]
-    }
+    # user_prompt = {
+    #     "days": days,
+    #     "start_location": {"lat": 37.5547, "lng": 126.9706},
+    #     "places": places, # [:6 * days * 4]
+    #     "restaurants": restaurants, # [:3 * days * 4]
+    #     "accommodations": accommodations # [:days * 4]
+    # }
 
-    print("🤖 Gemini가 초기 계획을 생성하고 있습니다...")
-    prompt = system_prompt + "\n\n" + json.dumps(user_prompt, ensure_ascii=False)
+    # print("🤖 Gemini가 초기 계획을 생성하고 있습니다...")
+    # prompt = system_prompt + "\n\n" + json.dumps(user_prompt, ensure_ascii=False)
     
-    start_time = time.time()
-    response = client.models.generate_content(model="gemini-2.5-flash-lite", contents=prompt)
-    print(f"⏱ Gemini 응답 시간: {round(time.time() - start_time, 3)}초")
+    # start_time = time.time()
+    # response = client.models.generate_content(model="gemini-2.5-flash-lite", contents=prompt)
+    # print(f"⏱ Gemini 응답 시간: {round(time.time() - start_time, 3)}초")
 
-    try:
-        result = extract_json(response.text)
-        # result.json 저장 (백업용)
-        with open("result.json", "w", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"❌ JSON 파싱 실패: {e}")
-        exit()
+    # try:
+    #     result = extract_json(response.text)
+    #     # result.json 저장 (백업용)
+    #     with open("result.json", "w", encoding="utf-8") as f:
+    #         json.dump(result, f, ensure_ascii=False, indent=2)
+    # except Exception as e:
+    #     print(f"❌ JSON 파싱 실패: {e}")
+    #     exit()
 
-    # result = json.load(open("result.json", "r", encoding="utf-8"))
+    result = json.load(open("result.json", "r", encoding="utf-8"))
 
     # 5. 세부 일정 설정
     first_day_start_str = input("여행 첫날 시작 시간 (예: 14:00) : ").strip() or "10:00"
