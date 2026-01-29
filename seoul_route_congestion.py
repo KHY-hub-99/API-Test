@@ -605,8 +605,11 @@ def get_all_detailed_paths(trip_legs, departure_time):
                         total_ride_diff += (final_ride_time - ride_time)
                         total_wait_diff += (final_wait_time - wait_time)
 
-                    if final_wait_time > 0:
+                    if final_wait_time > 0 and not is_walk:
                         segs.append(f"대기 : {final_wait_time}분")
+                    elif is_walk:
+                        # 도보일 경우 대기 시간을 그냥 도보 시간에 합쳐버리는 방식
+                        final_ride_time += final_wait_time
 
                     if is_walk:
                         segs.append(f"도보 : {final_ride_time}분")
