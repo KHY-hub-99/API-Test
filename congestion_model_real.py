@@ -13,6 +13,7 @@ import glob
 import os
 import dotenv
 import time
+import joblib
 
 dotenv.load_dotenv()
 
@@ -400,6 +401,38 @@ def train_model(data):
     
     return model_traffic, model_crowd, feature_cols
 
+def save_models(model_t, model_c, loc_map, features, filepath="seoul_congestion_model.pkl"):
+    # [NEW] model 폴더가 없으면 자동으로 만듭니다.
+    directory = os.path.dirname(filepath)
+    if directory and not os.path.exists(directory):
+        os.makedirs(directory, exist_ok=True)
+        print(f"📂 Created directory: {directory}")
+
+    print(f"\n💾 Saving models to {filepath}...")
+    package = {
+        'traffic_model': model_t,
+        'crowd_model': model_c,
+        'location_map': loc_map,
+        'features': features,
+        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    joblib.dump(package, filepath)
+    print("  ✅ Save complete!")
+
+def load_models(filepath="seoul_congestion_model.pkl"):
+    """저장된 모델 불러오기"""
+    if not os.path.exists(filepath):
+        return None
+    
+    print(f"\n📂 Loading models from {filepath}...")
+    try:
+        package = joblib.load(filepath)
+        print(f"  ✅ Load complete! (Saved at: {package.get('timestamp', 'Unknown')})")
+        return package
+    except Exception as e:
+        print(f"  ❌ Error loading file: {e}")
+        return None
+
 # ============================================
 # STEP 6: Make Predictions
 # ============================================
@@ -435,36 +468,51 @@ def predict_congestion(model_traffic, model_crowd, feature_cols, location_to_num
 if __name__ == "__main__":
     print("=" * 70)
     print("Seoul Dual Congestion Prediction Model")
-    print("서울 교통/인구 혼잡도 이중 예측 모델 (최종 수정판)")
     print("=" * 70)
 
-    # Step 1: Load traffic data
-    traffic_df = load_traffic_data()
-    if traffic_df is None:
-        print("Failed to load traffic data!")
-        exit(1)
+    # [수정] 모델 파일 경로를 'model' 폴더로 변경
+    model_file_path = "./model/seoul_congestion_model.pkl"
+    
+    # 1. 모델 불러오기 시도
+    saved_package = load_models(model_file_path)
 
-    # Step 2: Fetch floating population
-    data_dir = "./data"
-    file_name = "floating_population.xlsx"
-    file_path = os.path.join(data_dir, file_name)
-
-    if os.path.exists(file_path):
-        print(f"📂 기존 파일이 있어 로드합니다: {file_path}")
-        population_df = pd.read_excel(file_path)
+    if saved_package:
+        # 파일이 있으면 바로 로드
+        model_t = saved_package['traffic_model']
+        model_c = saved_package['crowd_model']
+        location_to_num = saved_package['location_map']
+        features = saved_package['features']
+        locations = list(location_to_num.keys()) # 장소 리스트 복원
+        
     else:
-        print("🚀 파일이 없어 API를 호출합니다...")
-        population_df = fetch_floating_population(start=1, end=5000)
-        if population_df is not None:
-            os.makedirs("./data", exist_ok=True) 
-            population_df.to_excel(file_path, index=False)
-            print("💾 데이터 저장 완료")
+        # 2. 파일이 없으면 학습 시작
+        print("🚀 No saved model found. Starting training process...")
+        
+        # Step 1: 데이터 로드
+        traffic_df = load_traffic_data()
+        if traffic_df is None: exit(1)
 
-    # Step 3: Prepare training data
-    data, location_to_num, locations = prepare_training_data(traffic_df, population_df)
+        # Step 2: 유동인구 데이터 확인 (여기는 data 폴더 유지)
+        data_dir = "./data"
+        pop_file = os.path.join(data_dir, "floating_population.xlsx")
+        
+        if os.path.exists(pop_file):
+            print(f"📂 Loading existing population data...")
+            population_df = pd.read_excel(pop_file)
+        else:
+            population_df = fetch_floating_population(start=1, end=5000)
+            if population_df is not None:
+                os.makedirs(data_dir, exist_ok=True)
+                population_df.to_excel(pop_file, index=False)
 
-    # Step 4: Train models
-    model_t, model_c, features = train_model(data)
+        # Step 3: 데이터 전처리
+        data, location_to_num, locations = prepare_training_data(traffic_df, population_df)
+
+        # Step 4: 학습
+        model_t, model_c, features = train_model(data)
+        
+        # Step 5: [중요] 학습 후 'model' 폴더에 저장
+        save_models(model_t, model_c, location_to_num, features, model_file_path)
 
     # ============================================
     # INTERACTIVE MODE
