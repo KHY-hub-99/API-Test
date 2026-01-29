@@ -587,15 +587,20 @@ if __name__ == "__main__":
     # 2. 장소 필터링
     area_mask = df["area"].str.contains(area, na=False)
 
-    filtered_spot = df[area_mask & (df["category"] != "식당") & (df["category"] != "숙박")][["name", "lat", "lng"]]
+    filtered_spot = df[area_mask & (df["category"] != "음식점") & (df["category"] != "숙박")][["name", "lat", "lng"]]
 
-    filtered_restaurant = df[area_mask & (df["category"] == "식당")][["name", "lat", "lng"]]
+    filtered_restaurant = df[area_mask & (df["category"] == "음식점")][["name", "lat", "lng"]]
 
     filtered_accom = df[area_mask & (df["category"] == "숙박")][["name", "lat", "lng"]]
 
     places = filtered_spot.to_dict(orient="records")
+    print(len(places), "개의 관광지가 선택되었습니다.")
+
     restaurants = filtered_restaurant.to_dict(orient="records")
+    print(len(restaurants), "개의 식당이 선택되었습니다.")
+
     accommodations = filtered_accom.to_dict(orient="records")
+    print(len(accommodations), "개의 숙박 시설이 선택되었습니다.")
 
     # 3. 날짜 입력
     start_date = input("여행 시작 일자 (예: 2026-01-20): ")
@@ -629,15 +634,10 @@ if __name__ == "__main__":
     너는 서울 여행 장소 추천기다. 반드시 아래 JSON 스키마 형식으로만 출력한다.
     {schema}
     규칙:
-    - 입력된 days 만큼 day1, day2, ... 생성
-    - 여행 시작 일자 : {start_date}, 여행 종료 일자 : {end_date}
-    - 매일 관광지 5곳 + 식당 2곳 구성
-    - route에는 places 목록에서만 선택
-    - restaurants에는 restaurants 목록에서만 선택
-    - accommodations에는 accommodations 목록에서만 선택
-    - route는 이동 동선을 고려하여 방문 순서 최적화
-    - restaurants는 해당 day의 마지막 관광지와 가까운 순서로 2곳 선택
-    - accommodations는 해당 day의 마지막 관광지와 가까운 순서로 1곳 선택
+    - route 배열에는 오직 '관광지' 카테고리의 장소만 5개 담는다. (식당/숙박 절대 금지)
+    - restaurants 배열에는 별도로 식당 2개를 담는다.
+    - accommodations 배열에는 별도로 숙박 1개를 담는다.
+    - 모든 장소는 제공된 각 목록에서만 추출한다.
     - 마지막 날에는 accommodations 포함하지 않음
     - 설명 문장은 출력하지 않는다
     - 반드시 JSON만 출력한다
