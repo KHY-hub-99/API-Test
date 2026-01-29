@@ -596,7 +596,7 @@ def get_all_detailed_paths(trip_legs, departure_time):
                     else:
                         # 지하철이 아니면(버스) 도로 혼잡도 적용
                         if not is_subway:
-                            base_penalty = 3 if t_emoji == '🔴' else 0
+                            base_penalty = 1 if t_emoji == '🔴' else 0
                             final_ride_time = math.ceil(ride_time * t_weight) + base_penalty
                         
                         if wait_time > 0:
