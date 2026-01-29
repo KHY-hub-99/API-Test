@@ -14,6 +14,7 @@ import os
 import dotenv
 import time
 import joblib
+from sklearn.inspection import permutation_importance
 
 dotenv.load_dotenv()
 
@@ -202,21 +203,28 @@ def get_road_capacity(location_name):
 
 def get_weather_features(month, hour):
     weather = SEOUL_WEATHER_2025.get(month, SEOUL_WEATHER_2025[1])
-    np.random.seed(month * 100 + hour)
+
+    rng = np.random.RandomState(month * 100 + hour)  # 🔥 local RNG
     rain_prob = weather['rain_prob']
-    if 14 <= hour <= 18: rain_prob *= 1.2
-    
-    is_raining = 1 if np.random.random() < (rain_prob / 100) else 0
+
+    if 14 <= hour <= 18:
+        rain_prob *= 1.2
+
+    is_raining = 1 if rng.rand() < (rain_prob / 100) else 0
     impact = WEATHER_IMPACT['clear']
-    
+
     if is_raining:
         impact = WEATHER_IMPACT['heavy_rain'] if rain_prob > 50 else WEATHER_IMPACT['rain']
-    elif weather['temp'] < 0: impact = WEATHER_IMPACT['cold']
-    elif weather['temp'] > 30: impact = WEATHER_IMPACT['hot']
+    elif weather['temp'] < 0:
+        impact = WEATHER_IMPACT['cold']
+    elif weather['temp'] > 30:
+        impact = WEATHER_IMPACT['hot']
 
     return {
-        'temperature': weather['temp'], 'rain_prob': rain_prob,
-        'is_raining': is_raining, 'weather_impact': impact
+        'temperature': weather['temp'],
+        'rain_prob': rain_prob,
+        'is_raining': is_raining,
+        'weather_impact': impact
     }
 
 # ============================================
@@ -280,13 +288,53 @@ def prepare_training_data(traffic_df, population_df=None):
     # 5. 유동인구 병합
     print("  6. Merging floating population...")
     if population_df is not None and not population_df.empty:
+
         population_df['sensing_str'] = population_df['sensing_time'].astype(str)
-        population_df['hour'] = population_df['sensing_str'].str.extract(r'_(\d{2}):').astype(float).fillna(0).astype(int)
-        
-        pop_agg = population_df.groupby('hour')['visitor_count'].mean().reset_index()
+
+        # 1️⃣ 정규식으로 hour 추출 (Series로!)
+        population_df['hour'] = (
+            population_df['sensing_str']
+            .str.extract(r'_(\d{2})', expand=False)   # ⭐ expand=False 중요
+            .astype(float)
+        )
+
+        # 2️⃣ datetime fallback
+        parsed_dt = pd.to_datetime(
+            population_df['sensing_str'],
+            errors='coerce',
+            format='%Y%m%d_%H:%M:%S'
+        )
+
+        population_df['hour'] = (
+            population_df['hour']
+            .fillna(parsed_dt.dt.hour)
+            .fillna(0)
+            .astype(int)
+        )
+
+        # 3️⃣ 시간대별 유동인구 집계
+        pop_agg = (
+            population_df
+            .groupby('hour')['visitor_count']
+            .mean()
+            .reset_index()
+        )
+
         pop_agg['floating_population'] = (pop_agg['visitor_count'] * 100).astype(int)
-        aggregated = aggregated.merge(pop_agg, on='hour', how='left')
-        aggregated['floating_population'] = aggregated['floating_population'].ffill().fillna(30000)
+
+        # 4️⃣ 병합
+        aggregated = aggregated.merge(
+            pop_agg[['hour', 'floating_population']],
+            on='hour',
+            how='left'
+        )
+
+        aggregated['floating_population'] = (
+            aggregated['floating_population']
+            .ffill()
+            .bfill()
+            .fillna(30000)
+        )
     else:
         aggregated['floating_population'] = np.random.randint(5000, 100000, size=len(aggregated))
 
@@ -574,6 +622,7 @@ if __name__ == "__main__":
                 hour = now.hour
                 dow = now.weekday()
                 month = now.month
+                day = now.day            # 🔥 FIX: day 추가
                 today_str = now.strftime('%Y%m%d')
                 is_hol = 1 if today_str in KOREAN_HOLIDAYS_2025 else 0
                 is_wknd = 1 if dow >= 5 else 0

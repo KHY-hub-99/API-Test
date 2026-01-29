@@ -1,6 +1,14 @@
 import os
 import multiprocessing
+import sys
+import joblib  # AI 모델 로딩용
+import pandas as pd
+import numpy as np 
+import pickle
 
+# ---------------------------------------------------------
+# 1. 환경 설정
+# ---------------------------------------------------------
 available_cores = multiprocessing.cpu_count()
 JAVA_PARALLELISM = 1
 print(f"⚙️  설정된 사용 코어 수: {JAVA_PARALLELISM}개")
@@ -10,7 +18,6 @@ os.environ["JAVA_OPTS"] = f"-Xmx8G -Djava.util.concurrent.ForkJoinPool.common.pa
 from google import genai
 import zipfile
 import json
-import pandas as pd
 import geopandas as gpd
 import math
 from datetime import datetime, timedelta
@@ -19,72 +26,154 @@ from ortools.constraint_solver import routing_enums_pb2, pywrapcp
 import time
 import re
 from r5py import TransportNetwork, TravelTimeMatrix, DetailedItineraries, TransportMode
-import pickle
 from concurrent.futures import ThreadPoolExecutor
+
+# ---------------------------------------------------------
+# [핵심] 혼잡도 예측기 클래스 (모델 연동)
+# ---------------------------------------------------------
+class CongestionPredictor:
+    def __init__(self, model_path="./model/seoul_congestion_model.pkl"):
+        self.is_ready = False
+        self.model_t = None
+        self.model_c = None
+        self.loc_map = {}
+        
+        # 공휴일 데이터 (학습 때와 동일하게 유지)
+        self.HOLIDAYS = {
+            # 1월: 신정
+            '20260101', 
+            
+            # 2월: 설날 연휴 (월~수)
+            '20260216', '20260217', '20260218', 
+            
+            # 3월: 삼일절(일) + 대체공휴일(월)
+            '20260301', '20260302', 
+            
+            # 5월: 어린이날(화), 부처님오신날(일) + 대체공휴일(월)
+            '20260505', '20260524', '20260525', 
+            
+            # 6월: 지방선거(수), 현충일(토)
+            '20260603', '20260606', 
+            
+            # 8월: 광복절(토)
+            '20260815', 
+            
+            # 9월: 추석 연휴 (목~토)
+            '20260924', '20260925', '20260926', 
+            
+            # 10월: 개천절(토), 한글날(금)
+            '20261003', '20261009', 
+            
+            # 12월: 성탄절(금)
+            '20261225'
+        }
+        
+        # 모델 로드 시도
+        try:
+            if os.path.exists(model_path):
+                print(f"🤖 Loading AI Model from {model_path}...")
+                package = joblib.load(model_path)
+                self.model_t = package['traffic_model']
+                self.model_c = package['crowd_model']
+                self.loc_map = package['location_map']
+                self.is_ready = True
+                print("  ✅ AI Prediction Ready!")
+            else:
+                print("  ⚠️ Model file not found. Running in fallback mode.")
+        except Exception as e:
+            print(f"  ❌ Model load error: {e}")
+
+    def _get_road_capacity(self, name):
+        """도로 용량 추정 (학습 때와 동일)"""
+        if '터널' in name: return 2500
+        elif '대로' in name: return 2000
+        elif '역' in name: return 1800
+        elif '로' in name: return 1500
+        return 1600
+
+    def get_factors(self, place_name, visit_dt, temp=20, is_rain=False):
+        """
+        혼잡도에 따른 시간 가중치 계산
+        return: (교통가중치, 추가대기시간, (교통라벨, 인구라벨))
+        """
+        if not self.is_ready: 
+            return 1.0, 0, ("Unknown", "Unknown")
+
+        # 입력 데이터 생성
+        loc_code = self.loc_map.get(place_name, 0) # 없는 장소면 0(기본값) 처리
+        hour = visit_dt.hour
+        is_wknd = 1 if visit_dt.weekday() >= 5 else 0
+        w_impact = 1.3 if is_rain else 1.0
+        
+        input_df = pd.DataFrame([{
+            'location_code': loc_code, 'hour': hour, 'day_of_week': visit_dt.weekday(),
+            'month': visit_dt.month, 'is_weekend': is_wknd, 'is_holiday': 0,
+            'temperature': temp, 'rain_prob': 0, 'weather_impact': w_impact,
+            'road_capacity': self._get_road_capacity(place_name)
+        }])
+
+        try:
+            t_pred = self.model_t.predict(input_df)[0] # 0:Low, 1:Med, 2:High
+            c_pred = self.model_c.predict(input_df)[0]
+            
+            # [가중치 로직]
+            # 1. 교통: High면 이동시간 1.5배, Medium이면 1.2배
+            travel_mult = 1.0
+            if t_pred == 2: travel_mult = 1.5
+            elif t_pred == 1: travel_mult = 1.2
+
+            # 2. 인구: High면 대기시간 +30분, Medium이면 +10분
+            stay_add_min = 0
+            if c_pred == 2: stay_add_min = 30
+            elif c_pred == 1: stay_add_min = 10
+
+            labels = (["Low","Medium","High"][t_pred], ["Low","Medium","High"][c_pred])
+            return travel_mult, stay_add_min, labels
+
+        except:
+            return 1.0, 0, ("Error", "Error")
+
+# 전역 예측기 생성 (최초 1회 로딩)
+predictor = CongestionPredictor()
 
 # ============================================================
 # 1. 환경 설정 및 전역 상수
 # ============================================================ 
-# API 키 설정
 load_dotenv()
 API_KEY = os.getenv("API_KEY")
 client = genai.Client(api_key=API_KEY)
 
-# 캐시 저장소
+# 전역 상수
 DETAILED_PATH_CACHE = {}
-
-# 폴백(좌표 없는 경우) 이동 시간 설정(분)
 FALLBACK_MOVE_MIN = 30
-
-# 도보 이동 제한 (km -> 분 환산 기준 등)
-WALK_ONLY_THRESHOLD_MIN = 12   
-WALK_ONLY_THRESHOLD_MAX = 18   
-
 MAX_TRANSFERS = 2
 MAX_TRAVEL_TIME_MIN = 90
-
-# 시간 윈도우 설정
 LUNCH_WINDOW = ("11:20", "13:20")
 DINNER_WINDOW = ("17:40", "19:30")
 
-# 장소별 체류 시간
 stay_time_map = {
     "관광지": 90, "카페": 50, "식당": 70, 
     "박물관": 120, "공원": 60, "시장": 80, "숙박": 0
 }
 
-# 데이터 파일 경로
 osm_file = "./data/seoul_osm_v.pbf"
 gtfs_files = ["./data/seoul_area_gtfs.zip"]
 
 # ============================================================
 # 2. 유틸리티 함수
 # ============================================================
-def parse_time(t):
-    return datetime.strptime(t, "%H:%M")
+# ---------------------------------------------------------
+def parse_time(t): return datetime.strptime(t, "%H:%M")
 
 def haversine(lat1, lon1, lat2, lon2):
-    R = 6371  # km
+    R = 6371 
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
     dlambda = math.radians(lon2 - lon1)
     a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
     return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
-def approx_walk_minutes(start, end):
-    # start/end가 좌표 없음(None)일 수 있으므로 안전 처리
-    if not start or not end or start.get("lat") is None or end.get("lat") is None:
-        return FALLBACK_MOVE_MIN
-    dist_km = haversine(start["lat"], start["lng"], end["lat"], end["lng"])
-    return dist_km * 15
-
-def dynamic_walk_threshold(dist_km):
-    if dist_km < 0.6: return WALK_ONLY_THRESHOLD_MAX
-    elif dist_km < 1.2: return 15
-    else: return WALK_ONLY_THRESHOLD_MIN
-
 def travel_minutes(p1, p2):
-    # 좌표가 없으면 0을 반환(상위 로직에서 고정일정 보정으로 최소 시간 적용됨)
     if p1 is None or p2 is None or p1.get("lat") is None or p2.get("lat") is None: return 0
     dist = haversine(p1["lat"], p1["lng"], p2["lat"], p2["lng"])
     return int(dist / 30 * 60)
@@ -102,17 +191,13 @@ def duration_to_minutes(val):
     except: return 0
 
 def extract_json(text):
-    if not text:
-        raise ValueError("Gemini 응답이 비어있습니다.")
+    if not text: raise ValueError("Gemini 응답 없음")
     text = text.strip()
     if text.startswith("```"):
         text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
+        if text.startswith("json"): text = text[4:]
     start = text.find("{")
     end = text.rfind("}") + 1
-    if start == -1 or end == -1:
-        raise ValueError("JSON 파싱 실패:\n" + text)
     return json.loads(text[start:end])
 
 # ============================================================
@@ -606,68 +691,68 @@ if __name__ == "__main__":
     days = (end - start).days + 1
     print(f"총 여행 일수: {days}일")
 
-    # 4. Gemini API 호출 (1차 계획 생성)
-    schema = """
-    {
-      "plans": {
-        "day1": {
-          "route": [
-            {"name": "...", "category": "...", "lat": 0.0, "lng": 0.0}
-          ],
-          "restaurants": [
-            {"name": "...", "category": "식당", "lat": 0.0, "lng": 0.0}
-          ],
-          "accommodations": [
-            {"name": "...", "category": "숙박", "lat": 0.0, "lng": 0.0}
-          ]
-        }
-      }
-    }
-    """
+    # # 4. Gemini API 호출 (1차 계획 생성)
+    # schema = """
+    # {
+    #   "plans": {
+    #     "day1": {
+    #       "route": [
+    #         {"name": "...", "category": "...", "lat": 0.0, "lng": 0.0}
+    #       ],
+    #       "restaurants": [
+    #         {"name": "...", "category": "식당", "lat": 0.0, "lng": 0.0}
+    #       ],
+    #       "accommodations": [
+    #         {"name": "...", "category": "숙박", "lat": 0.0, "lng": 0.0}
+    #       ]
+    #     }
+    #   }
+    # }
+    # """
     
-    system_prompt = f"""
-    너는 서울 여행 장소 추천기다. 반드시 아래 JSON 스키마 형식으로만 출력한다.
-    {schema}
-    규칙:
-    - 입력된 days 만큼 day1, day2, ... 생성
-    - 여행 시작 일자 : {start_date}, 여행 종료 일자 : {end_date}
-    - 매일 관광지 5곳 + 식당 2곳 구성
-    - route에는 places 목록에서만 선택
-    - restaurants에는 restaurants 목록에서만 선택
-    - accommodations에는 accommodations 목록에서만 선택
-    - route는 이동 동선을 고려하여 방문 순서 최적화
-    - restaurants는 해당 day의 마지막 관광지와 가까운 순서로 2곳 선택
-    - accommodations는 해당 day의 마지막 관광지와 가까운 순서로 1곳 선택
-    - 마지막 날에는 accommodations 포함하지 않음
-    - 설명 문장은 출력하지 않는다
-    - 반드시 JSON만 출력한다
-    """
+    # system_prompt = f"""
+    # 너는 서울 여행 장소 추천기다. 반드시 아래 JSON 스키마 형식으로만 출력한다.
+    # {schema}
+    # 규칙:
+    # - 입력된 days 만큼 day1, day2, ... 생성
+    # - 여행 시작 일자 : {start_date}, 여행 종료 일자 : {end_date}
+    # - 매일 관광지 5곳 + 식당 2곳 구성
+    # - route에는 places 목록에서만 선택
+    # - restaurants에는 restaurants 목록에서만 선택
+    # - accommodations에는 accommodations 목록에서만 선택
+    # - route는 이동 동선을 고려하여 방문 순서 최적화
+    # - restaurants는 해당 day의 마지막 관광지와 가까운 순서로 2곳 선택
+    # - accommodations는 해당 day의 마지막 관광지와 가까운 순서로 1곳 선택
+    # - 마지막 날에는 accommodations 포함하지 않음
+    # - 설명 문장은 출력하지 않는다
+    # - 반드시 JSON만 출력한다
+    # """
 
-    user_prompt = {
-        "days": days,
-        "start_location": {"lat": 37.5547, "lng": 126.9706},
-        "places": places[:6 * days * 4],
-        "restaurants": restaurants[:3 * days * 4],
-        "accommodations": accommodations[:days * 4]
-    }
+    # user_prompt = {
+    #     "days": days,
+    #     "start_location": {"lat": 37.5547, "lng": 126.9706},
+    #     "places": places[:6 * days * 4],
+    #     "restaurants": restaurants[:3 * days * 4],
+    #     "accommodations": accommodations[:days * 4]
+    # }
 
-    print("🤖 Gemini가 초기 계획을 생성하고 있습니다...")
-    prompt = system_prompt + "\n\n" + json.dumps(user_prompt, ensure_ascii=False)
+    # print("🤖 Gemini가 초기 계획을 생성하고 있습니다...")
+    # prompt = system_prompt + "\n\n" + json.dumps(user_prompt, ensure_ascii=False)
     
-    start_time = time.time()
-    response = client.models.generate_content(model="gemini-2.5-flash-lite", contents=prompt)
-    print(f"⏱ Gemini 응답 시간: {round(time.time() - start_time, 3)}초")
+    # start_time = time.time()
+    # response = client.models.generate_content(model="gemini-2.5-flash-lite", contents=prompt)
+    # print(f"⏱ Gemini 응답 시간: {round(time.time() - start_time, 3)}초")
 
-    try:
-        result = extract_json(response.text)
-        # result.json 저장 (백업용)
-        with open("result.json", "w", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"❌ JSON 파싱 실패: {e}")
-        exit()
+    # try:
+    #     result = extract_json(response.text)
+    #     # result.json 저장 (백업용)
+    #     with open("result.json", "w", encoding="utf-8") as f:
+    #         json.dump(result, f, ensure_ascii=False, indent=2)
+    # except Exception as e:
+    #     print(f"❌ JSON 파싱 실패: {e}")
+    #     exit()
 
-    # result = json.load(open("result.json", "r", encoding="utf-8"))
+    result = json.load(open("result.json", "r", encoding="utf-8"))
 
     # 5. 세부 일정 설정
     first_day_start_str = input("여행 첫날 시작 시간 (예: 14:00) : ").strip() or "10:00"
