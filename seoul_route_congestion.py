@@ -646,9 +646,9 @@ if __name__ == "__main__":
     user_prompt = {
         "days": days,
         "start_location": {"lat": 37.5547, "lng": 126.9706},
-        "places": places[:6 * days * 4],
-        "restaurants": restaurants[:3 * days * 4],
-        "accommodations": accommodations[:days * 4]
+        "places": places, # [:6 * days * 4]
+        "restaurants": restaurants, # [:3 * days * 4]
+        "accommodations": accommodations # [:days * 4]
     }
 
     print("🤖 Gemini가 초기 계획을 생성하고 있습니다...")

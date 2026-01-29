@@ -49,7 +49,7 @@ DINNER_WINDOW = ("17:40", "19:30")
 
 # 장소별 체류 시간
 stay_time_map = {
-    "관광지": 90, "카페": 50, "식당": 70, 
+    "관광지": 90, "카페": 50, "음식점": 70, 
     "박물관": 120, "공원": 60, "시장": 80, "숙박": 0
 }
 
@@ -402,8 +402,8 @@ def build_nodes(places, restaurants, fixed_events, day_start_dt):
         nodes.append({"name": p["name"], "category": p["category"], "lat": p.get("lat"), "lng": p.get("lng"), "stay": stay_time_map.get(p["category"], 60), "type": "spot"})
 
     if restaurants:
-        nodes.append({"name": restaurants[0]["name"], "category": "식당", "lat": restaurants[0].get("lat"), "lng": restaurants[0].get("lng"), "stay": 70, "type": "lunch"})
-        nodes.append({"name": restaurants[1]["name"], "category": "식당", "lat": restaurants[1].get("lat"), "lng": restaurants[1].get("lng"), "stay": 70, "type": "dinner"})
+        nodes.append({"name": restaurants[0]["name"], "category": "음식점", "lat": restaurants[0].get("lat"), "lng": restaurants[0].get("lng"), "stay": 70, "type": "lunch"})
+        nodes.append({"name": restaurants[1]["name"], "category": "음식점", "lat": restaurants[1].get("lat"), "lng": restaurants[1].get("lng"), "stay": 70, "type": "dinner"})
 
     nodes.extend(build_fixed_nodes(fixed_events, day_start_dt))
     return nodes
@@ -597,7 +597,7 @@ if __name__ == "__main__":
     print(len(places), "개의 관광지가 선택되었습니다.")
 
     restaurants = filtered_restaurant.to_dict(orient="records")
-    print(len(restaurants), "개의 식당이 선택되었습니다.")
+    print(len(restaurants), "개의 음식점이 선택되었습니다.")
 
     accommodations = filtered_accom.to_dict(orient="records")
     print(len(accommodations), "개의 숙박 시설이 선택되었습니다.")
@@ -620,7 +620,7 @@ if __name__ == "__main__":
             {"name": "...", "category": "...", "lat": 0.0, "lng": 0.0}
           ],
           "restaurants": [
-            {"name": "...", "category": "식당", "lat": 0.0, "lng": 0.0}
+            {"name": "...", "category": "음식점", "lat": 0.0, "lng": 0.0}
           ],
           "accommodations": [
             {"name": "...", "category": "숙박", "lat": 0.0, "lng": 0.0}
@@ -631,24 +631,23 @@ if __name__ == "__main__":
     """
     
     system_prompt = f"""
-    너는 서울 여행 장소 추천기다. 반드시 아래 JSON 스키마 형식으로만 출력한다.
+    너는 '서울 여행 장소 추천 전문가'이다. 반드시 제공된 데이터만을 사용하여 계획을 세운다.
     {schema}
-    규칙:
-    - route 배열에는 오직 '관광지' 카테고리의 장소만 5개 담는다. (식당/숙박 절대 금지)
-    - restaurants 배열에는 별도로 식당 2개를 담는다.
-    - accommodations 배열에는 별도로 숙박 1개를 담는다.
-    - 모든 장소는 제공된 각 목록에서만 추출한다.
-    - 마지막 날에는 accommodations 포함하지 않음
-    - 설명 문장은 출력하지 않는다
-    - 반드시 JSON만 출력한다
+    [절대 규칙]
+    1. 모든 장소의 이름, 카테고리, 좌표(lat, lng)는 입력된 데이터와 100% 일치해야 한다. 절대 값을 수정하거나 새로운 좌표를 생성하지 마라.
+    2. 'route' 배열: 오직 제공된 'places' 목록에서 5개를 선택하여 담는다.
+    3. 'restaurants' 배열: 오직 제공된 'restaurants' 목록에서 2개를 선택한다.
+    4. 'accommodations' 배열: 오직 제공된 'accommodations' 목록에서 1개를 선택한다. (마지막 날은 빈 배열 []로 출력)
+    5. 할루시네이션 방지: 목록에 없는 장소나 좌표를 출력할 경우 시스템 오류로 간주한다.
+    6. 출력 형식: 반드시 순수 JSON 데이터만 출력하며, 설명이나 추가 텍스트를 절대 포함하지 않는다.
     """
 
     user_prompt = {
         "days": days,
         "start_location": {"lat": 37.5547, "lng": 126.9706},
-        "places": places[:6 * days * 4],
-        "restaurants": restaurants[:3 * days * 4],
-        "accommodations": accommodations[:days * 4]
+        "places": places, # [:6 * days * 4]
+        "restaurants": restaurants, # [:3 * days * 4]
+        "accommodations": accommodations # [:days * 4]
     }
 
     print("🤖 Gemini가 초기 계획을 생성하고 있습니다...")
