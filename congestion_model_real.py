@@ -1,11 +1,11 @@
-# Seoul Congestion Prediction Model using Real Data (Enhanced)
+# Seoul Dual Congestion Prediction Model (Traffic & Crowd)
 # Features: Traffic, Floating Population, Day of Week, Holidays, Weather, Road Capacity
 
 import pandas as pd
 import numpy as np
 import requests
 import xml.etree.ElementTree as ET
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, HistGradientBoostingClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report
 from datetime import datetime
@@ -31,7 +31,6 @@ TRAFFIC_DATA_PATH = "./data"
 def get_current_weather_seoul():
     """Fetch current weather for Seoul from wttr.in (free, no API key needed)"""
     try:
-        # wttr.in provides free weather data in JSON format
         url = "https://wttr.in/Seoul?format=j1"
         response = requests.get(url, timeout=10)
         response.raise_for_status()
@@ -43,11 +42,9 @@ def get_current_weather_seoul():
         humidity = int(current['humidity'])
         weather_desc = current['weatherDesc'][0]['value'].lower()
 
-        # Determine if it's raining
         rain_keywords = ['rain', 'drizzle', 'shower', 'thunderstorm', 'sleet']
         is_raining = any(keyword in weather_desc for keyword in rain_keywords)
 
-        # Determine if it's snowing
         snow_keywords = ['snow', 'blizzard', 'ice']
         is_snowing = any(keyword in weather_desc for keyword in snow_keywords)
 
@@ -61,114 +58,57 @@ def get_current_weather_seoul():
         }
     except Exception as e:
         return {
-            'temp': None,
-            'humidity': None,
-            'description': 'unknown',
-            'is_raining': False,
-            'is_snowing': False,
-            'success': False,
-            'error': str(e)
+            'temp': None, 'humidity': None, 'description': 'unknown',
+            'is_raining': False, 'is_snowing': False, 'success': False, 'error': str(e)
         }
 
 # ============================================
 # KOREAN HOLIDAYS 2025 (공휴일)
 # ============================================
 KOREAN_HOLIDAYS_2025 = {
-    # 신정 (New Year's Day)
-    '20250101': '신정',
-    # 설날 (Lunar New Year) - Jan 28-30
-    '20250128': '설날연휴',
-    '20250129': '설날',
-    '20250130': '설날연휴',
-    # 삼일절 (Independence Movement Day)
-    '20250301': '삼일절',
-    # 대체공휴일 (Substitute holiday)
-    '20250303': '대체공휴일',
-    # 어린이날 (Children's Day)
-    '20250505': '어린이날',
-    # 부처님오신날 (Buddha's Birthday) - May 5
-    '20250505': '부처님오신날',
-    # 대체공휴일
-    '20250506': '대체공휴일',
-    # 현충일 (Memorial Day)
-    '20250606': '현충일',
-    # 광복절 (Liberation Day)
-    '20250815': '광복절',
-    # 추석 (Chuseok) - Oct 5-7
-    '20251005': '추석연휴',
-    '20251006': '추석',
-    '20251007': '추석연휴',
-    '20251008': '대체공휴일',
-    # 개천절 (National Foundation Day)
-    '20251003': '개천절',
-    # 한글날 (Hangul Day)
-    '20251009': '한글날',
-    # 크리스마스 (Christmas)
-    '20251225': '크리스마스',
+    '20250101': '신정', '20250128': '설날연휴', '20250129': '설날', '20250130': '설날연휴',
+    '20250301': '삼일절', '20250303': '대체공휴일', '20250505': '어린이날',
+    '20250506': '대체공휴일', '20250606': '현충일', '20250815': '광복절',
+    '20251003': '개천절', '20251005': '추석연휴', '20251006': '추석',
+    '20251007': '추석연휴', '20251008': '대체공휴일', '20251009': '한글날',
+    '20251225': '크리스마스'
 }
 
 # ============================================
 # ROAD CAPACITY DATA (도로 용량)
-# Based on road type: tunnel, main road, intersection
 # ============================================
 ROAD_CAPACITY = {
-    # Tunnels (터널) - typically higher capacity
-    '터널': 2500,
-    # Main roads (대로)
-    '대로': 2000,
-    # Regular roads (로)
-    '로': 1500,
-    # Intersections/stations (역, 교차로)
-    '역': 1800,
-    # Default
-    'default': 1600
+    '터널': 2500, '대로': 2000, '로': 1500, '역': 1800, 'default': 1600
 }
 
 # ============================================
-# WEATHER PATTERNS FOR SEOUL 2025 (서울 날씨 패턴)
-# Monthly averages: temp (°C), rain probability (%), conditions
+# WEATHER PATTERNS FOR SEOUL 2025
 # ============================================
 SEOUL_WEATHER_2025 = {
-    1: {'temp': -2, 'rain_prob': 15, 'condition': 'cold'},
-    2: {'temp': 1, 'rain_prob': 15, 'condition': 'cold'},
-    3: {'temp': 6, 'rain_prob': 25, 'condition': 'mild'},
-    4: {'temp': 13, 'rain_prob': 30, 'condition': 'mild'},
-    5: {'temp': 18, 'rain_prob': 35, 'condition': 'warm'},
-    6: {'temp': 23, 'rain_prob': 50, 'condition': 'rainy'},  # 장마 start
-    7: {'temp': 26, 'rain_prob': 60, 'condition': 'rainy'},  # 장마 peak
-    8: {'temp': 27, 'rain_prob': 45, 'condition': 'hot'},
-    9: {'temp': 22, 'rain_prob': 35, 'condition': 'mild'},
-    10: {'temp': 15, 'rain_prob': 25, 'condition': 'mild'},
-    11: {'temp': 7, 'rain_prob': 20, 'condition': 'cold'},
-    12: {'temp': 0, 'rain_prob': 20, 'condition': 'cold'},
+    1: {'temp': -2, 'rain_prob': 15}, 2: {'temp': 1, 'rain_prob': 15},
+    3: {'temp': 6, 'rain_prob': 25}, 4: {'temp': 13, 'rain_prob': 30},
+    5: {'temp': 18, 'rain_prob': 35}, 6: {'temp': 23, 'rain_prob': 50},
+    7: {'temp': 26, 'rain_prob': 60}, 8: {'temp': 27, 'rain_prob': 45},
+    9: {'temp': 22, 'rain_prob': 35}, 10: {'temp': 15, 'rain_prob': 25},
+    11: {'temp': 7, 'rain_prob': 20}, 12: {'temp': 0, 'rain_prob': 20}
 }
 
-# Weather condition impact on congestion (multiplier)
 WEATHER_IMPACT = {
-    'clear': 1.0,
-    'cloudy': 1.05,
-    'rain': 1.3,      # Rain increases congestion by 30%
-    'heavy_rain': 1.5,
-    'snow': 1.4,
-    'cold': 1.1,      # Extreme cold
-    'hot': 1.1,       # Extreme heat
+    'clear': 1.0, 'cloudy': 1.05, 'rain': 1.3,
+    'heavy_rain': 1.5, 'snow': 1.4, 'cold': 1.1, 'hot': 1.1
 }
 
 # ============================================
 # STEP 1: Load Traffic Volume Data from Excel
 # ============================================
 def load_traffic_data():
-    """Load all monthly traffic volume Excel files"""
     print("=== Loading Traffic Volume Data (교통량 데이터 로딩) ===")
-
     excel_files = glob.glob(os.path.join(TRAFFIC_DATA_PATH, "*.xlsx"))
     all_traffic_data = []
 
     for file in sorted(excel_files):
         print(f"  Loading: {os.path.basename(file)}")
         xlsx = pd.ExcelFile(file)
-
-        # Get the data sheet (second sheet, named like "2025년 01월")
         data_sheets = [s for s in xlsx.sheet_names if "2025년" in s]
         if data_sheets:
             df = pd.read_excel(xlsx, sheet_name=data_sheets[0])
@@ -184,15 +124,12 @@ def load_traffic_data():
 # STEP 2: Fetch Floating Population from S-DoT API
 # ============================================
 def fetch_floating_population(start=1, end=5000):
-    """
-    S-DoT API에서 1,000건씩 끊어서 데이터를 수집하고 합칩니다.
-    """
     print(f"\n=== Fetching Floating Population Data (유동인구 데이터 수집) ===")
     print(f"  Target Range: {start} to {end}")
     
     all_data = []
     current_start = start
-    batch_size = 1000  # API 제한
+    batch_size = 1000  
 
     while current_start <= end:
         current_end = min(current_start + batch_size - 1, end)
@@ -203,38 +140,30 @@ def fetch_floating_population(start=1, end=5000):
         try:
             response = requests.get(url, timeout=30)
             response.raise_for_status()
-
             root = ET.fromstring(response.content)
             
-            # 에러 체크
             result_code = root.find('.//CODE')
             if result_code is not None and result_code.text != 'INFO-000':
                 print(f"  API Warning at batch {current_start}: {result_code.text}")
-                # 데이터가 없으면 루프 중단 (예: 요청 범위가 실제 데이터보다 클 때)
                 break
 
             rows = root.findall('.//row')
-            if not rows:
-                break
+            if not rows: break
 
             for row in rows:
                 all_data.append({
                     'sensing_time': row.findtext('SENSING_TIME'),
                     'region': row.findtext('REGION'),
-                    'district': row.findtext('AUTONOMOUS_DISTRICT'),
-                    'dong': row.findtext('ADMINISTRATIVE_DISTRICT'),
                     'visitor_count': int(row.findtext('VISITOR_COUNT') or 0),
                 })
             
-            # 다음 배치를 위해 인덱스 증가
             current_start += batch_size
-            time.sleep(0.1)  # 서버 부하 방지용 짧은 대기
+            time.sleep(0.1) 
 
         except Exception as e:
             print(f"  API request failed at {current_start}: {e}")
             break
 
-    # 데이터가 하나라도 모였으면 DataFrame 생성
     if all_data:
         df = pd.DataFrame(all_data)
         print(f"  ✅ Successfully fetched {len(df)} total records.")
@@ -247,345 +176,270 @@ def fetch_floating_population(start=1, end=5000):
 # STEP 3: Feature Engineering Functions
 # ============================================
 def get_day_of_week(date_str):
-    """Convert date string to day of week (0=Monday, 6=Sunday)"""
-    try:
-        date = datetime.strptime(str(date_str), '%Y%m%d')
-        return date.weekday()
-    except:
-        return 0
+    try: return datetime.strptime(str(date_str), '%Y%m%d').weekday()
+    except: return 0
 
-def get_day_name_korean(day_code):
-    """Get Korean day name from code"""
+def get_day_name_korean(day_str):
+    """ '월' -> 0, '화' -> 1 로 변환 """
     day_map = {'월': 0, '화': 1, '수': 2, '목': 3, '금': 4, '토': 5, '일': 6}
-    return day_map.get(day_code, 0)
+    try: return day_map.get(str(day_str).strip(), 0)
+    except: return 0
 
-def is_weekend(day_of_week):
-    """Check if day is weekend (Saturday=5, Sunday=6)"""
-    return 1 if day_of_week >= 5 else 0
-
-def is_holiday(date_str):
-    """Check if date is a Korean holiday"""
-    return 1 if str(date_str) in KOREAN_HOLIDAYS_2025 else 0
-
-def get_holiday_name(date_str):
-    """Get holiday name if applicable"""
-    return KOREAN_HOLIDAYS_2025.get(str(date_str), None)
-
+def is_weekend(day_of_week): return 1 if day_of_week >= 5 else 0
+def is_holiday(date_str): return 1 if str(date_str) in KOREAN_HOLIDAYS_2025 else 0
 def get_month(date_str):
-    """Extract month from date string"""
-    try:
-        return int(str(date_str)[4:6])
-    except:
-        return 1
+    try: return int(str(date_str)[4:6])
+    except: return 1
 
 def get_road_capacity(location_name):
-    """Estimate road capacity based on location name"""
     location_name = str(location_name)
-
-    if '터널' in location_name:
-        return ROAD_CAPACITY['터널']
-    elif '대로' in location_name:
-        return ROAD_CAPACITY['대로']
-    elif '역' in location_name:
-        return ROAD_CAPACITY['역']
-    elif '로' in location_name:
-        return ROAD_CAPACITY['로']
-    else:
-        return ROAD_CAPACITY['default']
+    if '터널' in location_name: return ROAD_CAPACITY['터널']
+    elif '대로' in location_name: return ROAD_CAPACITY['대로']
+    elif '역' in location_name: return ROAD_CAPACITY['역']
+    elif '로' in location_name: return ROAD_CAPACITY['로']
+    else: return ROAD_CAPACITY['default']
 
 def get_weather_features(month, hour):
-    """Get weather features based on month and time"""
     weather = SEOUL_WEATHER_2025.get(month, SEOUL_WEATHER_2025[1])
-
-    # Simulate daily weather variation
     np.random.seed(month * 100 + hour)
-
-    # Base rain probability adjusted by hour (higher in afternoon)
     rain_prob = weather['rain_prob']
-    if 14 <= hour <= 18:
-        rain_prob *= 1.2
-
-    # Determine if it's raining
+    if 14 <= hour <= 18: rain_prob *= 1.2
+    
     is_raining = 1 if np.random.random() < (rain_prob / 100) else 0
-
-    # Weather impact multiplier
+    impact = WEATHER_IMPACT['clear']
+    
     if is_raining:
-        if rain_prob > 50:
-            impact = WEATHER_IMPACT['heavy_rain']
-        else:
-            impact = WEATHER_IMPACT['rain']
-    elif weather['condition'] == 'cold' and weather['temp'] < 0:
-        impact = WEATHER_IMPACT['cold']
-    elif weather['condition'] == 'hot' and weather['temp'] > 30:
-        impact = WEATHER_IMPACT['hot']
-    else:
-        impact = WEATHER_IMPACT['clear']
+        impact = WEATHER_IMPACT['heavy_rain'] if rain_prob > 50 else WEATHER_IMPACT['rain']
+    elif weather['temp'] < 0: impact = WEATHER_IMPACT['cold']
+    elif weather['temp'] > 30: impact = WEATHER_IMPACT['hot']
 
     return {
-        'temperature': weather['temp'],
-        'rain_prob': rain_prob,
-        'is_raining': is_raining,
-        'weather_impact': impact
+        'temperature': weather['temp'], 'rain_prob': rain_prob,
+        'is_raining': is_raining, 'weather_impact': impact
     }
 
 # ============================================
-# STEP 4: Process and Prepare Training Data
+# STEP 4: Process and Prepare Training Data (고속 최적화)
 # ============================================
 def prepare_training_data(traffic_df, population_df=None):
-    """Prepare data for model training with all features"""
-    print("\n=== Preparing Training Data (훈련 데이터 준비) ===")
+    print("\n=== Preparing Training Data (훈련 데이터 준비 - 고속 최적화 버전) ===")
 
-    # Process traffic data - reshape from wide to long format
+    # 1. 교통 데이터 전처리
+    print("  1. Transforming traffic data (Melting)...")
     hour_cols = [f"{i}시" for i in range(24)]
-
-    # Melt the dataframe to get hourly data
-    id_vars = ['일자', '요일', '지점명', '지점번호', '방향', '구분']
     available_hour_cols = [col for col in hour_cols if col in traffic_df.columns]
-
+    
     traffic_long = traffic_df.melt(
-        id_vars=id_vars,
+        id_vars=['일자', '요일', '지점명'], 
         value_vars=available_hour_cols,
-        var_name='시간',
-        value_name='traffic_volume'
-    )
-
-    # Extract hour as integer
+        var_name='시간', value_name='traffic_volume'
+    ).dropna()
+    
     traffic_long['hour'] = traffic_long['시간'].str.replace('시', '').astype(int)
+    print(f"     -> Rows to process: {len(traffic_long):,}")
 
-    # Drop rows with missing traffic volume
-    traffic_long = traffic_long.dropna(subset=['traffic_volume'])
-
-    print(f"  Total hourly records: {len(traffic_long):,}")
-
-    # ============================================
-    # ADD NEW FEATURES
-    # ============================================
-    print("\n  Adding features...")
-
-    # 1. Day of week (요일)
-    print("    - Day of week (요일)")
-    traffic_long['day_of_week'] = traffic_long['요일'].apply(get_day_name_korean)
-
-    # 2. Is weekend (주말)
-    print("    - Weekend flag (주말)")
-    traffic_long['is_weekend'] = traffic_long['day_of_week'].apply(is_weekend)
-
-    # 3. Is holiday (공휴일)
-    print("    - Holiday flag (공휴일)")
+    # 2. 기본 특성 추가
+    print("  2. Adding basic features...")
+    day_map = {'월': 0, '화': 1, '수': 2, '목': 3, '금': 4, '토': 5, '일': 6}
+    traffic_long['day_of_week'] = traffic_long['요일'].map(lambda x: day_map.get(str(x).strip(), 0))
+    
+    traffic_long['is_weekend'] = traffic_long['day_of_week'].apply(lambda x: 1 if x >= 5 else 0)
     traffic_long['is_holiday'] = traffic_long['일자'].apply(is_holiday)
+    traffic_long['month'] = traffic_long['일자'].astype(str).str[4:6].astype(int)
+    
+    # 도로 용량 매핑
+    print("  3. Mapping road capacity...")
+    def fast_capacity(name):
+        if '터널' in name: return 2500
+        if '대로' in name: return 2000
+        if '역' in name: return 1800
+        if '로' in name: return 1500
+        return 1600
+    traffic_long['road_capacity'] = traffic_long['지점명'].apply(fast_capacity)
+    
+    # 3. 날씨 특성 추가 (Lookup Table 방식)
+    print("  4. Calculating weather features (Optimized)...")
+    weather_lookup = []
+    for m in range(1, 13):
+        for h in range(24):
+            w = get_weather_features(m, h)
+            w['month'] = m
+            w['hour'] = h
+            weather_lookup.append(w)
+    
+    weather_df = pd.DataFrame(weather_lookup)
+    traffic_long = traffic_long.merge(weather_df, on=['month', 'hour'], how='left')
 
-    # 4. Month (월)
-    print("    - Month (월)")
-    traffic_long['month'] = traffic_long['일자'].apply(get_month)
+    # 4. 데이터 집계
+    print("  5. Aggregating data...")
+    group_cols = ['지점명', 'hour', 'day_of_week', 'month', 'is_weekend', 'is_holiday', 'road_capacity']
+    mean_cols = ['traffic_volume', 'temperature', 'rain_prob', 'weather_impact']
+    aggregated = traffic_long.groupby(group_cols)[mean_cols].mean().reset_index()
 
-    # 5. Road capacity (도로 용량)
-    print("    - Road capacity (도로 용량)")
-    traffic_long['road_capacity'] = traffic_long['지점명'].apply(get_road_capacity)
-
-    # 6. Traffic to capacity ratio (용량 대비 교통량)
-    traffic_long['capacity_ratio'] = traffic_long['traffic_volume'] / traffic_long['road_capacity']
-
-    # 7. Weather features (날씨)
-    print("    - Weather features (날씨)")
-    weather_features = traffic_long.apply(
-        lambda row: get_weather_features(row['month'], row['hour']), axis=1
-    )
-    traffic_long['temperature'] = weather_features.apply(lambda x: x['temperature'])
-    traffic_long['is_raining'] = weather_features.apply(lambda x: x['is_raining'])
-    traffic_long['weather_impact'] = weather_features.apply(lambda x: x['weather_impact'])
-
-    # Create location encoding
-    locations = traffic_long['지점명'].unique()
-    location_to_num = {loc: i for i, loc in enumerate(locations)}
-    traffic_long['location'] = traffic_long['지점명'].map(location_to_num)
-
-    print(f"\n  Unique locations: {len(locations)}")
-
-    # Aggregate by location, hour, day_of_week, month
-    print("  Aggregating data...")
-    aggregated = traffic_long.groupby(['지점명', 'hour', 'day_of_week', 'month']).agg({
-        'traffic_volume': 'mean',
-        'is_weekend': 'first',
-        'is_holiday': 'max',  # If any day in group is holiday
-        'road_capacity': 'first',
-        'capacity_ratio': 'mean',
-        'temperature': 'first',
-        'is_raining': 'mean',  # Probability of rain
-        'weather_impact': 'mean',
-    }).reset_index()
-
-    aggregated.columns = ['location_name', 'hour', 'day_of_week', 'month',
-                          'avg_traffic', 'is_weekend', 'is_holiday',
-                          'road_capacity', 'capacity_ratio',
-                          'temperature', 'rain_probability', 'weather_impact']
-
-    aggregated['location'] = aggregated['location_name'].map(location_to_num)
-
-    # Add floating population
-    if population_df is not None and len(population_df) > 0:
-        population_df['hour'] = population_df['sensing_time'].str.extract(r'_(\d{2}):').astype(int)
-        pop_by_hour = population_df.groupby('hour').agg({'visitor_count': 'mean'}).reset_index()
-        pop_by_hour.columns = ['hour', 'avg_visitor_count']
-        pop_by_hour['floating_population'] = (pop_by_hour['avg_visitor_count'] * 500).astype(int)
-        aggregated = aggregated.merge(pop_by_hour[['hour', 'floating_population']], on='hour', how='left')
-        aggregated['floating_population'] = aggregated['floating_population'].fillna(
-            aggregated['floating_population'].mean()
-        ).astype(int)
+    # 5. 유동인구 병합
+    print("  6. Merging floating population...")
+    if population_df is not None and not population_df.empty:
+        population_df['sensing_str'] = population_df['sensing_time'].astype(str)
+        population_df['hour'] = population_df['sensing_str'].str.extract(r'_(\d{2}):').astype(float).fillna(0).astype(int)
+        
+        pop_agg = population_df.groupby('hour')['visitor_count'].mean().reset_index()
+        pop_agg['floating_population'] = (pop_agg['visitor_count'] * 100).astype(int)
+        aggregated = aggregated.merge(pop_agg, on='hour', how='left')
+        aggregated['floating_population'] = aggregated['floating_population'].ffill().fillna(30000)
     else:
-        aggregated['floating_population'] = (aggregated['avg_traffic'] * np.random.uniform(20, 50, len(aggregated))).astype(int)
+        aggregated['floating_population'] = np.random.randint(5000, 100000, size=len(aggregated))
 
-    # ============================================
-    # DEFINE CONGESTION LEVELS (using capacity ratio)
-    # ============================================
-    print("\n  Defining congestion levels based on capacity ratio...")
+    # 6. Location Encoding
+    locations = aggregated['지점명'].unique()
+    location_to_num = {loc: i for i, loc in enumerate(locations)}
+    aggregated['location_code'] = aggregated['지점명'].map(location_to_num)
 
-    # Using capacity ratio is more meaningful than raw traffic
-    def assign_congestion(row):
-        ratio = row['capacity_ratio']
-        weather = row['weather_impact']
+    # 7. 정답(Label) 생성
+    print("  7. Generating labels...")
+    aggregated['capacity_ratio'] = aggregated['traffic_volume'] / aggregated['road_capacity']
+    
+    thresholds = 0.85 / aggregated['weather_impact']
+    conditions = [
+        (aggregated['capacity_ratio'] > thresholds),
+        (aggregated['capacity_ratio'] > thresholds * 0.6)
+    ]
+    choices = [2, 1] 
+    aggregated['traffic_level'] = np.select(conditions, choices, default=0)
 
-        # Adjust thresholds based on weather
-        high_threshold = 0.85 / weather  # Lower threshold in bad weather
-        med_threshold = 0.60 / weather
+    max_pop_df = aggregated.groupby('지점명')['floating_population'].max().reset_index()
+    max_pop_df.columns = ['지점명', 'max_pop']
+    aggregated = aggregated.merge(max_pop_df, on='지점명', how='left')
+    aggregated['pop_ratio'] = aggregated['floating_population'] / aggregated['max_pop']
+    
+    pop_conditions = [
+        (aggregated['pop_ratio'] > 0.8),
+        (aggregated['pop_ratio'] > 0.5)
+    ]
+    aggregated['crowd_level'] = np.select(pop_conditions, [2, 1], default=0)
 
-        if ratio > high_threshold:
-            return 2  # High
-        elif ratio > med_threshold:
-            return 1  # Medium
-        else:
-            return 0  # Low
-
-    aggregated['congestion_level'] = aggregated.apply(assign_congestion, axis=1)
-
-    # Print statistics
-    print(f"\n  Dataset statistics:")
-    print(f"    Total samples: {len(aggregated):,}")
-    print(f"    Weekend samples: {aggregated['is_weekend'].sum():,} ({aggregated['is_weekend'].mean()*100:.1f}%)")
-    print(f"    Holiday samples: {aggregated['is_holiday'].sum():,} ({aggregated['is_holiday'].mean()*100:.1f}%)")
-    print(f"    Rainy samples: {(aggregated['rain_probability'] > 0.5).sum():,}")
-
-    print(f"\n  Congestion level distribution:")
-    for level, name in [(0, 'Low (원활)'), (1, 'Medium (보통)'), (2, 'High (혼잡)')]:
-        count = (aggregated['congestion_level'] == level).sum()
-        pct = count / len(aggregated) * 100
-        print(f"    {name}: {count:,} ({pct:.1f}%)")
-
+    print(f"  ✅ Dataset Ready: {len(aggregated)} rows processed.")
     return aggregated, location_to_num, locations
 
 # ============================================
-# STEP 5: Train Model
+# STEP 5: Train Model (수정됨 - Train/Test 분리 및 상세 평가)
 # ============================================
 def train_model(data):
-    """Train Random Forest model with enhanced features"""
-    print("\n=== Training Random Forest Model (랜덤 포레스트 훈련) ===")
+    print("\n=== Training Dual Models (Gradient Boosting: 성능 개선 버전) ===")
 
-    # Enhanced feature set
     feature_cols = [
-        'location', 'hour', 'day_of_week', 'month',
-        'is_weekend', 'is_holiday',
-        'avg_traffic', 'road_capacity', 'capacity_ratio',
-        'temperature', 'rain_probability', 'weather_impact',
-        'floating_population'
+        'location_code', 'hour', 'day_of_week', 'month', 
+        'is_weekend', 'is_holiday', 
+        'temperature', 'rain_prob', 'weather_impact', 'road_capacity'
     ]
-
+    
     X = data[feature_cols]
-    y = data['congestion_level']
+    y_traffic = data['traffic_level'] 
+    y_crowd = data['crowd_level']     
 
-    # Split data
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
+    # 데이터 분리
+    X_train_t, X_test_t, y_train_t, y_test_t = train_test_split(
+        X, y_traffic, test_size=0.2, random_state=42, stratify=y_traffic
+    )
+    X_train_c, X_test_c, y_train_c, y_test_c = train_test_split(
+        X, y_crowd, test_size=0.2, random_state=42, stratify=y_crowd
     )
 
-    print(f"  Training samples: {len(X_train):,}")
-    print(f"  Test samples: {len(X_test):,}")
-    print(f"  Features: {len(feature_cols)}")
+    print(f"  📊 Data Split: Train {len(X_train_t):,} / Test {len(X_test_t):,}")
 
-    # Train model
-    model = RandomForestClassifier(
-        n_estimators=200,
-        max_depth=15,
-        min_samples_split=5,
+    # ==========================================
+    # 3. 모델 1: 교통 혼잡도 (부스팅 모델 적용)
+    # ==========================================
+    print("\n  🚗 [1] Training Traffic Model (Gradient Boosting)...")
+    
+    # [핵심 변경] RandomForest -> HistGradientBoostingClassifier
+    # 이 모델은 틀린 문제를 집중적으로 학습합니다.
+    model_traffic = HistGradientBoostingClassifier(
+        max_iter=500,            # 학습 횟수를 대폭 늘림 (기존 200 -> 500)
+        learning_rate=0.05,      # [중요] 횟수가 늘어난 만큼 학습 속도를 늦춤 (기존 0.1 -> 0.05)
+        max_depth=12,            # 나무 깊이를 제한하여 과적합 방지
+        min_samples_leaf=40,     # 한 노드에 최소 40개의 데이터가 있어야 분기 (노이즈 무시)
+        l2_regularization=1.5,   # 규제 강도 증가 (일반화 성능 향상)
+        early_stopping=True,     # [필수] 더 이상 좋아지지 않으면 500번 다 안 채우고 멈춤 (시간 절약)
         random_state=42,
-        n_jobs=-1
+        class_weight='balanced'  # 데이터 불균형 해소
     )
-    model.fit(X_train, y_train)
+    model_traffic.fit(X_train_t, y_train_t)
+    
+    y_pred_t = model_traffic.predict(X_test_t)
+    acc_t = accuracy_score(y_test_t, y_pred_t)
+    
+    print(f"    👉 Accuracy: {acc_t*100:.1f}%")
+    print("    👉 Classification Report:")
+    print(classification_report(y_test_t, y_pred_t, target_names=['Low', 'Medium', 'High']))
 
-    # Evaluate
-    y_pred = model.predict(X_test)
-    accuracy = accuracy_score(y_test, y_pred)
+    # ==========================================
+    # 4. 모델 2: 인구 혼잡도
+    # ==========================================
+    print("\n  👥 [2] Training Crowd Model (Gradient Boosting)...")
+    model_crowd = HistGradientBoostingClassifier(
+        max_iter=500,            # 학습 횟수를 대폭 늘림 (기존 200 -> 500)
+        learning_rate=0.05,      # [중요] 횟수가 늘어난 만큼 학습 속도를 늦춤 (기존 0.1 -> 0.05)
+        max_depth=12,            # 나무 깊이를 제한하여 과적합 방지
+        min_samples_leaf=40,     # 한 노드에 최소 40개의 데이터가 있어야 분기 (노이즈 무시)
+        l2_regularization=1.5,   # 규제 강도 증가 (일반화 성능 향상)
+        early_stopping=True,     # [필수] 더 이상 좋아지지 않으면 500번 다 안 채우고 멈춤 (시간 절약)
+        random_state=42,
+        class_weight='balanced'  # 데이터 불균형 해소
+    )
+    model_crowd.fit(X_train_c, y_train_c)
+    
+    y_pred_c = model_crowd.predict(X_test_c)
+    acc_c = accuracy_score(y_test_c, y_pred_c)
+    
+    print(f"    👉 Accuracy: {acc_c*100:.1f}%")
+    print("    👉 Classification Report:")
+    print(classification_report(y_test_c, y_pred_c, target_names=['Low', 'Medium', 'High']))
 
-    print(f"\n  Model Accuracy: {accuracy * 100:.1f}%")
-    print("\n  Classification Report:")
-    print(classification_report(y_test, y_pred, target_names=['Low', 'Medium', 'High']))
-
-    # Feature importance
-    print("\n  Feature Importance (특성 중요도):")
-    importance_df = pd.DataFrame({
-        'feature': feature_cols,
-        'importance': model.feature_importances_
-    }).sort_values('importance', ascending=False)
-
-    for _, row in importance_df.iterrows():
-        bar = '█' * int(row['importance'] * 50)
-        print(f"    {row['feature']:20s}: {row['importance']:.3f} {bar}")
-
-    return model, feature_cols, X_test, y_test
+    # (참고) HistGradientBoosting은 feature_importances_ 속성이 없습니다.
+    # 대신 permutation importance를 써야 하지만, 여기서는 생략하고 컬럼 목록만 반환합니다.
+    
+    return model_traffic, model_crowd, feature_cols
 
 # ============================================
 # STEP 6: Make Predictions
 # ============================================
-def predict_congestion(model, feature_cols, location_to_num, location_name,
-                       hour, day_of_week, month, is_weekend, is_holiday,
-                       traffic, road_capacity, temperature, is_raining, population):
-    """Predict congestion for given conditions"""
+def predict_congestion(model_traffic, model_crowd, feature_cols, location_to_num, 
+                       location_name, hour, day_of_week, month, is_weekend, is_holiday, 
+                       road_cap, temp, rain_prob, weather_impact):
+    
     if location_name not in location_to_num:
-        return None, "Location not found"
+        return None, None
 
-    capacity_ratio = traffic / road_capacity
-    weather_impact = WEATHER_IMPACT['rain'] if is_raining else WEATHER_IMPACT['clear']
-    rain_prob = 0.7 if is_raining else 0.1
+    input_data = pd.DataFrame([{
+        'location_code': location_to_num[location_name],
+        'hour': hour,
+        'day_of_week': day_of_week,
+        'month': month,
+        'is_weekend': is_weekend,
+        'is_holiday': is_holiday,
+        'temperature': temp,
+        'rain_prob': rain_prob,
+        'weather_impact': weather_impact,
+        'road_capacity': road_cap
+    }])
 
-    data = pd.DataFrame({
-        'location': [location_to_num[location_name]],
-        'hour': [hour],
-        'day_of_week': [day_of_week],
-        'month': [month],
-        'is_weekend': [is_weekend],
-        'is_holiday': [is_holiday],
-        'avg_traffic': [traffic],
-        'road_capacity': [road_capacity],
-        'capacity_ratio': [capacity_ratio],
-        'temperature': [temperature],
-        'rain_probability': [rain_prob],
-        'weather_impact': [weather_impact],
-        'floating_population': [population]
-    })
+    t_pred = model_traffic.predict(input_data)[0]
+    c_pred = model_crowd.predict(input_data)[0]
 
-    pred = model.predict(data)[0]
-    levels = {0: "Low (원활)", 1: "Medium (보통)", 2: "High (혼잡)"}
-    return pred, levels[pred]
+    level_map = {0: "Low (쾌적)", 1: "Medium (보통)", 2: "High (혼잡)"}
+    return level_map[t_pred], level_map[c_pred]
 
 # ============================================
 # MAIN EXECUTION
 # ============================================
 if __name__ == "__main__":
     print("=" * 70)
-    print("Seoul Congestion Prediction Model (Enhanced)")
-    print("서울 혼잡도 예측 모델 (개선판)")
-    print("=" * 70)
-    print("\nFeatures included (포함된 특성):")
-    print("  ✓ Traffic volume (교통량)")
-    print("  ✓ Day of week (요일)")
-    print("  ✓ Weekend/Weekday (주말/평일)")
-    print("  ✓ Korean holidays (공휴일)")
-    print("  ✓ Weather conditions (날씨)")
-    print("  ✓ Road capacity (도로 용량)")
-    print("  ✓ Floating population (유동인구)")
+    print("Seoul Dual Congestion Prediction Model")
+    print("서울 교통/인구 혼잡도 이중 예측 모델 (최종 수정판)")
     print("=" * 70)
 
     # Step 1: Load traffic data
     traffic_df = load_traffic_data()
-
     if traffic_df is None:
         print("Failed to load traffic data!")
         exit(1)
@@ -601,9 +455,7 @@ if __name__ == "__main__":
     else:
         print("🚀 파일이 없어 API를 호출합니다...")
         population_df = fetch_floating_population(start=1, end=5000)
-
         if population_df is not None:
-            # ./data 폴더가 없으면 자동으로 생성 (에러 방지)
             os.makedirs("./data", exist_ok=True) 
             population_df.to_excel(file_path, index=False)
             print("💾 데이터 저장 완료")
@@ -611,297 +463,116 @@ if __name__ == "__main__":
     # Step 3: Prepare training data
     data, location_to_num, locations = prepare_training_data(traffic_df, population_df)
 
-    # Step 4: Train model
-    model, feature_cols, X_test, y_test = train_model(data)
-
-    # Step 5: Sample predictions
-    print("\n" + "=" * 70)
-    print("Sample Predictions (예측 결과 샘플)")
-    print("=" * 70)
-
-    sample_loc = list(locations)[0]  # 성산로(금화터널)
-    road_cap = get_road_capacity(sample_loc)
-
-    test_scenarios = [
-        # (location, hour, day_of_week, month, is_weekend, is_holiday, traffic, temp, is_raining, pop, description)
-        (sample_loc, 8, 0, 3, 0, 0, 2200, 6, 0, 50000, "Monday morning rush (월요일 아침 러시)"),
-        (sample_loc, 8, 0, 7, 0, 0, 2200, 26, 1, 50000, "Monday morning + rain (월요일 아침 + 비)"),
-        (sample_loc, 14, 5, 5, 1, 0, 1500, 18, 0, 40000, "Saturday afternoon (토요일 오후)"),
-        (sample_loc, 10, 2, 1, 0, 1, 800, -2, 0, 20000, "설날 holiday (설날 공휴일)"),
-        (sample_loc, 18, 4, 6, 0, 0, 2500, 23, 1, 60000, "Friday evening + 장마 rain"),
-        (sample_loc, 23, 6, 8, 1, 0, 400, 27, 0, 10000, "Sunday late night (일요일 심야)"),
-    ]
-
-    print(f"\nLocation: {sample_loc} (Road capacity: {road_cap} vehicles/hour)")
-    print("-" * 70)
-
-    for loc, hour, dow, month, weekend, holiday, traffic, temp, rain, pop, desc in test_scenarios:
-        pred, level = predict_congestion(
-            model, feature_cols, location_to_num, loc,
-            hour, dow, month, weekend, holiday,
-            traffic, road_cap, temp, rain, pop
-        )
-        rain_icon = "🌧️" if rain else "☀️"
-        holiday_icon = "🎉" if holiday else ""
-        weekend_icon = "📅" if weekend else ""
-        print(f"  {hour:02d}:00 | {temp:3d}°C {rain_icon} {weekend_icon}{holiday_icon} | Traffic: {traffic:,} | → {level}")
-        print(f"         {desc}")
-        print()
-
-    # Print Korean holidays
-    print("=" * 70)
-    print("Korean Holidays 2025 (2025년 공휴일)")
-    print("=" * 70)
-    for date, name in sorted(KOREAN_HOLIDAYS_2025.items())[:10]:
-        print(f"  {date[:4]}-{date[4:6]}-{date[6:]}: {name}")
-    print("  ...")
-
-    print("\n" + "=" * 70)
-    print("Model ready for predictions! (모델 준비 완료)")
-    print("=" * 70)
+    # Step 4: Train models
+    model_t, model_c, features = train_model(data)
 
     # ============================================
-    # INTERACTIVE MODE (대화형 모드)
-    # Uses historical data + real-time weather automatically!
+    # INTERACTIVE MODE
     # ============================================
     print("\n" + "=" * 70)
     print("INTERACTIVE MODE (대화형 예측 모드)")
     print("=" * 70)
-    print("✓ Auto-lookup: Historical traffic data (과거 교통량)")
-    print("✓ Auto-lookup: Real-time weather (실시간 날씨)")
-    print("✓ Auto-detect: Current date/time (현재 날짜/시간)")
+    print("✓ 교통(Traffic)과 인구(Crowd) 혼잡도를 각각 예측합니다.")
+    print("✓ 미래 예측 시 교통량을 입력할 필요가 없습니다. (패턴 기반 예측)")
     print("\nEnter 'q' to quit (종료하려면 'q' 입력)\n")
 
-    # Show available locations
-    print("Available locations (사용 가능한 지점):")
     location_list = list(locations)
-    for i, loc in enumerate(location_list[:10]):
-        print(f"  {loc}")
-    if len(location_list) > 10:
-        print(f"  ... and {len(location_list) - 10} more")
-    print("\n  💡 Tip: Type part of the name to search (예: '강남', '터널', 'gangnam')")
+    for i, loc in enumerate(location_list[:10]): print(f"  {loc}")
+    if len(location_list) > 10: print(f"  ... and {len(location_list) - 10} more")
+    print("\n  💡 Tip: 검색할 지점명을 입력하세요 (예: 강남)")
     print()
 
     while True:
         try:
             print("-" * 50)
-
-            # Get current date/time as defaults
             now = datetime.now()
-            current_hour = now.hour
-            current_dow = now.weekday()
-            current_month = now.month
             day_names_en = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
-            # Get location by name search
+            # 1. 장소 선택
             loc_input = input("Location (지점명 검색): ").strip()
-            if loc_input.lower() == 'q':
-                break
-            if not loc_input:
-                loc_input = location_list[0]  # Default to first location
+            if loc_input.lower() == 'q': break
+            if not loc_input: loc_input = location_list[0]
 
-            # Search for matching locations
             matches = [loc for loc in location_list if loc_input.lower() in loc.lower()]
-
-            if len(matches) == 0:
-                print(f"  ❌ No locations found matching '{loc_input}'")
-                print(f"  Try: 터널, 대로, 역, 강남, 종로, etc.")
+            if not matches:
+                print(f"  ❌ 찾을 수 없습니다: '{loc_input}'")
                 continue
-            elif len(matches) == 1:
-                selected_loc = matches[0]
+            elif len(matches) == 1: selected_loc = matches[0]
             else:
-                # Multiple matches - let user choose
-                print(f"  Found {len(matches)} matches:")
-                for i, loc in enumerate(matches[:10]):
-                    print(f"    {i}: {loc}")
-                if len(matches) > 10:
-                    print(f"    ... and {len(matches) - 10} more (try a more specific search)")
-
+                for i, loc in enumerate(matches[:10]): print(f"    {i}: {loc}")
                 choice = input("  Select number [0]: ").strip()
-                if choice.lower() == 'q':
-                    break
+                if choice.lower() == 'q': break
                 choice_idx = int(choice) if choice else 0
-                if choice_idx < 0 or choice_idx >= len(matches):
-                    print(f"  Invalid! Enter 0-{len(matches)-1}")
-                    continue
                 selected_loc = matches[choice_idx]
 
             road_cap = get_road_capacity(selected_loc)
-            print(f"  ✓ Selected: {selected_loc} (capacity: {road_cap}/hr)")
+            print(f"  ✓ Selected: {selected_loc}")
 
-            # Ask: use current time or custom?
-            time_choice = input(f"Use current time? ({current_hour}:00 {day_names_en[current_dow]}) [Y/n]: ").strip().lower()
-            if time_choice == 'q':
-                break
+            # 2. 시간 선택
+            time_choice = input(f"Use current time? ({now.hour}:00) [Y/n]: ").strip().lower()
+            if time_choice == 'q': break
 
             if time_choice == 'n':
-                # Custom time input (ordered: Month → Day → Hour)
-                month_input = input("Month (월) [1-12]: ").strip()
-                if month_input.lower() == 'q':
-                    break
-                month = int(month_input) if month_input else current_month
-                if month < 1 or month > 12:
-                    print("  Invalid! Enter 1-12")
-                    continue
-
-                # Get day of month
-                day_input = input(f"Day of month (일) [1-31]: ").strip()
-                if day_input.lower() == 'q':
-                    break
-                day_of_month = int(day_input) if day_input else now.day
-                if day_of_month < 1 or day_of_month > 31:
-                    print("  Invalid! Enter 1-31")
-                    continue
-
-                # Calculate day of week from the date
-                try:
-                    selected_date = datetime(2025, month, day_of_month)
-                    day_of_week = selected_date.weekday()
-                    day_names_kr = ['월', '화', '수', '목', '금', '토', '일']
-                    print(f"  📅 2025-{month:02d}-{day_of_month:02d} is a {day_names_en[day_of_week]} ({day_names_kr[day_of_week]}요일)")
-                except ValueError:
-                    print(f"  Invalid date! {month}월 {day_of_month}일 doesn't exist.")
-                    continue
-
-                # Check if this date is a holiday
-                date_str = f"2025{month:02d}{day_of_month:02d}"
+                month = int(input("Month (1-12): ").strip())
+                day = int(input("Day (1-31): ").strip())
+                hour = int(input("Hour (0-23): ").strip())
+                
+                sel_date = datetime(2025, month, day)
+                dow = sel_date.weekday()
+                date_str = f"2025{month:02d}{day:02d}"
                 is_hol = 1 if date_str in KOREAN_HOLIDAYS_2025 else 0
-                if is_hol:
-                    holiday_name = KOREAN_HOLIDAYS_2025.get(date_str, 'Holiday')
-                    print(f"  🎉 This is a holiday: {holiday_name}")
-
-                hour_input = input("Hour (시간) [0-23]: ").strip()
-                if hour_input.lower() == 'q':
-                    break
-                hour = int(hour_input) if hour_input else current_hour
-                if hour < 0 or hour > 23:
-                    print("  Invalid! Enter 0-23")
-                    continue
+                is_wknd = 1 if dow >= 5 else 0
             else:
-                # Use current time
-                hour = current_hour
-                day_of_week = current_dow
-                month = current_month
-                print(f"  Using current: {hour}:00, {day_names_en[day_of_week]}, Month {month}")
-
-                # Check if today is a holiday
+                hour = now.hour
+                dow = now.weekday()
+                month = now.month
                 today_str = now.strftime('%Y%m%d')
                 is_hol = 1 if today_str in KOREAN_HOLIDAYS_2025 else 0
-                if is_hol:
-                    holiday_name = KOREAN_HOLIDAYS_2025.get(today_str, 'Holiday')
-                    print(f"  🎉 Today is a holiday: {holiday_name}")
+                is_wknd = 1 if dow >= 5 else 0
 
-            is_wknd = 1 if day_of_week >= 5 else 0
-
-            # ============================================
-            # AUTOMATICALLY FETCH REAL-TIME WEATHER
-            # ============================================
-            print("\n  🌤️ Fetching current weather for Seoul...")
+            # 3. 날씨 정보 가져오기
+            print("\n  🌤️ 날씨 정보 확인 중...")
             weather = get_current_weather_seoul()
-
             if weather['success']:
                 temp = weather['temp']
                 is_rain = 1 if weather['is_raining'] else 0
-                weather_desc = weather['description']
-                rain_icon = "🌧️" if is_rain else "☀️"
-                print(f"  {rain_icon} Current: {temp}°C, {weather_desc}")
-                if weather['is_raining']:
-                    print(f"  ⚠️ It's raining! Expect higher congestion.")
             else:
-                print(f"  ⚠️ Could not fetch weather (using seasonal default)")
                 temp = SEOUL_WEATHER_2025.get(month, {}).get('temp', 15)
                 is_rain = 0
+            
+            w_impact = 1.3 if is_rain else 1.0
+            rain_prob = 80 if is_rain else 10
 
-            # ============================================
-            # AUTOMATICALLY LOOK UP TRAFFIC FROM HISTORICAL DATA
-            # ============================================
-            # Find matching records in the training data
-            matching_data = data[
-                (data['location_name'] == selected_loc) &
-                (data['hour'] == hour) &
-                (data['day_of_week'] == day_of_week) &
-                (data['month'] == month)
-            ]
-
-            if len(matching_data) > 0:
-                # Use historical average
-                traffic = int(matching_data['avg_traffic'].mean())
-                population = int(matching_data['floating_population'].mean())
-                print(f"\n  📊 Found {len(matching_data)} historical records")
-                print(f"  📈 Historical avg traffic: {traffic:,} vehicles/hour")
-            else:
-                # Fallback: use location + hour average
-                fallback_data = data[
-                    (data['location_name'] == selected_loc) &
-                    (data['hour'] == hour)
-                ]
-                if len(fallback_data) > 0:
-                    traffic = int(fallback_data['avg_traffic'].mean())
-                    population = int(fallback_data['floating_population'].mean())
-                    print(f"\n  📊 Using location+hour average (no exact match)")
-                    print(f"  📈 Estimated traffic: {traffic:,} vehicles/hour")
-                else:
-                    # Last resort: location average
-                    loc_data = data[data['location_name'] == selected_loc]
-                    traffic = int(loc_data['avg_traffic'].mean()) if len(loc_data) > 0 else 1500
-                    population = int(loc_data['floating_population'].mean()) if len(loc_data) > 0 else 30000
-                    print(f"\n  📊 Using location average")
-                    print(f"  📈 Estimated traffic: {traffic:,} vehicles/hour")
-
-            # Get temperature from monthly data
-            temp = SEOUL_WEATHER_2025.get(month, {}).get('temp', 15)
-
-            # Adjust traffic for weather (rain increases congestion)
-            if is_rain:
-                traffic_adjusted = int(traffic * 0.9)  # Less cars but slower
-                print(f"  🌧️ Rain adjustment: traffic reduced to {traffic_adjusted:,} (but slower)")
-            else:
-                traffic_adjusted = traffic
-
-            # Adjust for holiday (less traffic)
-            if is_hol:
-                traffic_adjusted = int(traffic_adjusted * 0.6)
-                print(f"  🎉 Holiday adjustment: traffic reduced to {traffic_adjusted:,}")
-
-            # Make prediction
-            pred, level = predict_congestion(
-                model, feature_cols, location_to_num, selected_loc,
-                hour, day_of_week, month, is_wknd, is_hol,
-                traffic_adjusted, road_cap, temp, is_rain, population
+            # 4. 예측 수행
+            t_res, c_res = predict_congestion(
+                model_t, model_c, features, location_to_num, selected_loc,
+                hour, dow, month, is_wknd, is_hol,
+                road_cap, temp, rain_prob, w_impact
             )
 
-            # Display result
-            day_names = ['월', '화', '수', '목', '금', '토', '일']
-            rain_icon = "🌧️ Rain" if is_rain else "☀️ Clear"
-            holiday_text = " 🎉 Holiday" if is_hol else ""
-            weekend_text = " 📅 Weekend" if is_wknd else ""
-
-            print()
-            print("=" * 50)
-            print(f"📍 Location: {selected_loc}")
-            print(f"🕐 Time: {hour:02d}:00 ({day_names[day_of_week]}요일)")
-            print(f"📅 Month: {month}월 | {temp}°C | {rain_icon}{holiday_text}{weekend_text}")
-            print(f"🚗 Traffic: {traffic_adjusted:,} / {road_cap:,} capacity ({traffic_adjusted/road_cap*100:.0f}%)")
-            print(f"👥 Population: {population:,}")
+            # 5. 결과 출력
+            print("\n" + "="*50)
+            print(f"📍 {selected_loc} 예측 리포트")
+            print(f"📅 {month}월 {day_names_en[dow]} {hour}시 | 🌡️ {temp}°C")
             print("-" * 50)
+            
+            icon_t = "🟢" if "Low" in t_res else ("🔴" if "High" in t_res else "🟡")
+            print(f"🚗 [교통 혼잡도] : {icon_t} {t_res}")
+            
+            icon_c = "🟢" if "Low" in c_res else ("🔴" if "High" in c_res else "🟡")
+            print(f"👥 [인구 혼잡도] : {icon_c} {c_res}")
+            
+            if "High" in t_res and "High" in c_res:
+                print("\n🚨 경고: 최악의 혼잡 시간대입니다! 우회 권장.")
+            elif "High" in t_res:
+                print("\n💡 팁: 도로는 막히지만 사람은 적습니다. 대중교통 이용 추천!")
+            elif "High" in c_res:
+                print("\n💡 팁: 도로는 괜찮으나 장소가 붐빕니다.")
+                
+            print("="*50 + "\n")
 
-            # Color-coded result
-            if pred == 0:
-                print(f"✅ Prediction: {level}")
-                print("   Traffic is flowing smoothly!")
-            elif pred == 1:
-                print(f"⚠️  Prediction: {level}")
-                print("   Expect some delays.")
-            else:
-                print(f"🚨 Prediction: {level}")
-                print("   Heavy congestion expected!")
-            print("=" * 50)
-            print()
-
-        except ValueError:
-            print("  Invalid input! Please enter a number.")
-        except KeyboardInterrupt:
-            print("\n\nExiting...")
+        except Exception as e:
+            print(f"  Error: {e}")
             break
 
-    print("\nThank you for using Seoul Congestion Predictor! (이용해 주셔서 감사합니다!)")
+    print("\nThank you for using Seoul Dual Congestion Predictor!")
