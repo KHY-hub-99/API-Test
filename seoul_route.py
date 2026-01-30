@@ -8,6 +8,7 @@ os.environ["JAVA_HOME"] = r"C:\Program Files\Java\jdk-21.0.10"
 os.environ["JAVA_OPTS"] = f"-Xmx8G -Djava.util.concurrent.ForkJoinPool.common.parallelism={JAVA_PARALLELISM}"
 
 from google import genai
+from google.genai import types
 import zipfile
 import json
 import pandas as pd
@@ -467,7 +468,7 @@ def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_
 
     transit_callback = routing.RegisterTransitCallback(time_callback)
     routing.SetArcCostEvaluatorOfAllVehicles(transit_callback)
-    routing.AddDimension(transit_callback, 30, max_horizon_minutes, False, "Time")
+    routing.AddDimension(transit_callback, 480, max_horizon_minutes, False, "Time")
     time_dim = routing.GetDimensionOrDie("Time")
 
     time_windows = build_time_windows(nodes, day_start_dt)
@@ -518,43 +519,61 @@ def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_
     def build_timeline_by_type(path_type):
         timeline = []
         actual_visits = [n for n in visited_nodes if n["type"] != "depot"]
-        cursor = display_start_dt + timedelta(minutes=actual_visits[0]['arrival_min'])
+        
+        # 1. 시계의 시작점 설정
+        cursor_dt = display_start_dt + timedelta(minutes=actual_visits[0]['arrival_min'])
 
         for i, node in enumerate(actual_visits):
             transit_info = []
             travel_min = 0
             
+            # 2. 이동 시간 계산 (이전 노드에서 현재 노드까지)
             if i > 0:
                 prev = actual_visits[i-1]
                 path_options = path_map.get((prev['id'], node['id']))
-                
                 if path_options:
                     chosen_path = path_options.get(path_type, path_options.get('fastest', []))
                     transit_info = chosen_path
+                    # r5py가 알려준 구간별 분(minute) 합산
                     for segment in chosen_path:
                         mins = re.findall(r'(\d+)분', segment)
-                        for m in mins: travel_min += int(m)
+                        travel_min += sum(int(m) for m in mins)
                 else:
-                    # path_map에 정보가 없으면 좌표 유무 기반 폴백 적용
-                    if prev.get('lat') is None or node.get('lat') is None:
-                        travel_min = FALLBACK_MOVE_MIN
-                        transit_info = [f"도보 : {FALLBACK_MOVE_MIN}분"]
-                    else:
-                        dist = haversine(prev['lat'], prev['lng'], node['lat'], node['lng'])
-                        travel_min = int(dist * 15)
-                        transit_info = [f"도보 : {travel_min}분"]
+                    # 데이터가 없을 때만 폴백 적용
+                    dist = haversine(prev['lat'], prev['lng'], node['lat'], node['lng']) if prev.get('lat') else 0
+                    travel_min = int(dist * 15) if dist > 0 else FALLBACK_MOVE_MIN
+                    transit_info = [f"도보 : {travel_min}분"]
 
+            # 3. 도착 및 시작 시각 결정
+            # 기본적으로 [이전 종료 + 이동 시간]에 시작하지만, 
+            # 타임 윈도우(식사 등)가 있는 경우 20분 정도는 당겨서 시작할 수 있게 허용
+            arrival_dt = cursor_dt + timedelta(minutes=travel_min)
+            
+            # 솔버가 정한 타임 윈도우(window_start)와 비교
+            # 예: 17:40분 시작인데 17:20분에 도착했다면 -> 바로 시작! (20분 당기기)
+            if node["type"] in ["lunch", "dinner"]:
+                window_start_min, _ = build_time_windows([node], display_start_dt)[0]
+                window_start_dt = display_start_dt + timedelta(minutes=window_start_min)
+                
+                # 20분 조기 입장 허용 로직
+                earliest_start_dt = window_start_dt - timedelta(minutes=20)
+                
+                if arrival_dt < earliest_start_dt:
+                    wait_min = int((window_start_dt - arrival_dt).total_seconds() / 60)
+                    transit_info.append(f"현장 대기 : {wait_min}분")
+                    arrival_dt = window_start_dt # 너무 일찍 오면 정시작
+
+            # 4. 타임라인 기록 및 커서 업데이트
             if node["type"] == "fixed":
-                time_parts = node.get("orig_time_str", "00:00 - 00:00").split(" - ")
-                start_dt = datetime.strptime(f"{target_date_str} {time_parts[0]}", "%Y-%m-%d %H:%M")
-                end_dt = datetime.strptime(f"{target_date_str} {time_parts[1]}", "%Y-%m-%d %H:%M")
-                cursor = end_dt
-                time_str = node["orig_time_str"]
+                # 고정 일정은 r5py와 상관없이 약속된 시간을 따름
+                time_str = node.get("orig_time_str", "00:00 - 00:00")
+                time_parts = time_str.split(" - ")
+                cursor_dt = datetime.strptime(f"{target_date_str} {time_parts[1]}", "%Y-%m-%d %H:%M")
             else:
-                start_dt = cursor + timedelta(minutes=travel_min)
-                end_dt = start_dt + timedelta(minutes=node["stay"])
-                time_str = f"{start_dt.strftime('%H:%M')} - {end_dt.strftime('%H:%M')}"
-                cursor = end_dt
+                # 일반 장소는 도착 즉시 시작하여 stay만큼 머묾
+                end_dt = arrival_dt + timedelta(minutes=node["stay"])
+                time_str = f"{arrival_dt.strftime('%H:%M')} - {end_dt.strftime('%H:%M')}"
+                cursor_dt = end_dt
 
             timeline.append({
                 "name": node["name"],
@@ -619,17 +638,22 @@ if __name__ == "__main__":
     center_lon = SEOUL_GU_COORDS[area]["lon"]
 
     df["distance_km"] = df.apply(lambda r: haversine(center_lat, center_lon, r["lat"], r["lng"]), axis=1)
-    RADIUS_KM = 6
+    RADIUS_KM = 4
     
     # 2. 장소 필터링
     area_mask = df[df["distance_km"] <= RADIUS_KM].copy()
     print(f"\n📍 {area} 중심 반경 {RADIUS_KM}km 이내 장소 수: {len(area_mask)}")
-    
+
     dist_mask = df["distance_km"] <= RADIUS_KM
 
     filtered_spot = df[dist_mask & (df["category"] != "음식점") & (df["category"] != "숙박")][["name", "lat", "lng"]]
 
-    filtered_restaurant = df[dist_mask & (df["category"] == "음식점")][["name", "lat", "lng"]]
+    avg_lat = filtered_spot["lat"].mean()
+    avg_lng = filtered_spot["lng"].mean()
+
+    # 관광지 중심 1.5km 이내 식당만 추출 (훨씬 타이트한 동선)
+    df["dist_to_center"] = df.apply(lambda r: haversine(avg_lat, avg_lng, r["lat"], r["lng"]), axis=1)
+    filtered_restaurant = df[(df["dist_to_center"] <= 1.5) & (df["category"] == "음식점")][["name", "lat", "lng"]]
 
     filtered_accom = df[dist_mask & (df["category"] == "숙박")][["name", "lat", "lng"]]
 
@@ -651,62 +675,62 @@ if __name__ == "__main__":
     days = (end - start).days + 1
     print(f"총 여행 일수: {days}일")
 
-    # # 4. Gemini API 호출 (1차 계획 생성)
-    # schema = """
-    # {
-    #   "plans": {
-    #     "day1": {
-    #       "route": [
-    #         {"name": "...", "category": "...", "lat": 0.0, "lng": 0.0}
-    #       ],
-    #       "restaurants": [
-    #         {"name": "...", "category": "음식점", "lat": 0.0, "lng": 0.0}
-    #       ],
-    #       "accommodations": [
-    #         {"name": "...", "category": "숙박", "lat": 0.0, "lng": 0.0}
-    #       ]
-    #     }
-    #   }
-    # }
-    # """
+    # 4. Gemini API 호출 (1차 계획 생성)
+    schema = """
+    {
+      "plans": {
+        "day1": {
+          "route": [
+            {"name": "...", "category": "...", "lat": 0.0, "lng": 0.0}
+          ],
+          "restaurants": [
+            {"name": "...", "category": "음식점", "lat": 0.0, "lng": 0.0}
+          ],
+          "accommodations": [
+            {"name": "...", "category": "숙박", "lat": 0.0, "lng": 0.0}
+          ]
+        }
+      }
+    }
+    """
     
-    # system_prompt = f"""
-    # 너는 '서울 여행 장소 추천 전문가'이다. 반드시 제공된 데이터만을 사용하여 계획을 세운다.
-    # {schema}
-    # [절대 규칙]
-    # 1. 모든 장소의 이름, 카테고리, 좌표(lat, lng)는 입력된 데이터와 100% 일치해야 한다. 절대 값을 수정하거나 새로운 좌표를 생성하지 마라.
-    # 2. 'route' 배열: 오직 제공된 'places' 목록에서 5개를 선택하여 담는다.
-    # 3. 'restaurants' 배열: 오직 제공된 'restaurants' 목록에서 2개를 선택한다.
-    # 4. 'accommodations' 배열: 오직 제공된 'accommodations' 목록에서 1개를 선택한다. (마지막 날은 빈 배열 []로 출력)
-    # 5. 할루시네이션 방지: 목록에 없는 장소나 좌표를 출력할 경우 시스템 오류로 간주한다.
-    # 6. 출력 형식: 반드시 순수 JSON 데이터만 출력하며, 설명이나 추가 텍스트를 절대 포함하지 않는다.
-    # """
+    system_prompt = f"""
+    너는 '서울 여행 장소 추천 전문가'이다. 반드시 제공된 데이터만을 사용하여 계획을 세운다.
+    {schema}
+    [절대 규칙]
+    1. 모든 장소의 이름, 카테고리, 좌표(lat, lng)는 입력된 데이터와 100% 일치해야 한다. 절대 값을 수정하거나 새로운 좌표를 생성하지 마라.
+    2. 'route' 배열: 오직 제공된 'places' 목록에서 5개를 선택하여 담는다.
+    3. 'restaurants' 배열: 오직 제공된 'restaurants' 목록에서 2개를 선택한다.
+    4. 'accommodations' 배열: 오직 제공된 'accommodations' 목록에서 1개를 선택한다. (마지막 날은 빈 배열 []로 출력)
+    5. 할루시네이션 방지: 목록에 없는 장소나 좌표를 출력할 경우 시스템 오류로 간주한다.
+    6. 출력 형식: 반드시 순수 JSON 데이터만 출력하며, 설명이나 추가 텍스트를 절대 포함하지 않는다.
+    """
 
-    # user_prompt = {
-    #     "days": days,
-    #     "start_location": {"lat": 37.5547, "lng": 126.9706},
-    #     "places": places, # [:6 * days * 4]
-    #     "restaurants": restaurants, # [:3 * days * 4]
-    #     "accommodations": accommodations # [:days * 4]
-    # }
+    user_prompt = {
+        "days": days,
+        "start_location": {"lat": 37.5547, "lng": 126.9706},
+        "places": places, # [:6 * days * 4]
+        "restaurants": restaurants, # [:3 * days * 4]
+        "accommodations": accommodations # [:days * 4]
+    }
 
-    # print("🤖 Gemini가 초기 계획을 생성하고 있습니다...")
-    # prompt = system_prompt + "\n\n" + json.dumps(user_prompt, ensure_ascii=False)
+    print("🤖 Gemini가 초기 계획을 생성하고 있습니다...")
+    prompt = system_prompt + "\n\n" + json.dumps(user_prompt, ensure_ascii=False)
     
-    # start_time = time.time()
-    # response = client.models.generate_content(model="gemini-2.5-flash-lite", contents=prompt)
-    # print(f"⏱ Gemini 응답 시간: {round(time.time() - start_time, 3)}초")
+    start_time = time.time()
+    response = client.models.generate_content(model="gemini-2.5-flash-lite", contents=prompt, config={"temperature": 0})
+    print(f"⏱ Gemini 응답 시간: {round(time.time() - start_time, 3)}초")
 
-    # try:
-    #     result = extract_json(response.text)
-    #     # result.json 저장 (백업용)
-    #     with open("result.json", "w", encoding="utf-8") as f:
-    #         json.dump(result, f, ensure_ascii=False, indent=2)
-    # except Exception as e:
-    #     print(f"❌ JSON 파싱 실패: {e}")
-    #     exit()
+    try:
+        result = extract_json(response.text)
+        # result.json 저장 (백업용)
+        with open("result.json", "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"❌ JSON 파싱 실패: {e}")
+        exit()
 
-    result = json.load(open("result.json", "r", encoding="utf-8"))
+    # result = json.load(open("result.json", "r", encoding="utf-8"))
 
     # 5. 세부 일정 설정
     first_day_start_str = input("여행 첫날 시작 시간 (예: 14:00) : ").strip() or "10:00"
