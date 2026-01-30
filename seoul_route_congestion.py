@@ -82,11 +82,11 @@ def get_stay_weight(level):
     """
     혼잡도 등급에 따른 시간 가중치 반환
     0 (Low) -> 1.0 (변화 없음)
-    1 (Med) -> 1.1 (10% 증가)
-    2 (High) -> 1.3 (30% 증가)
+    1 (Med) -> 1.1 (20% 증가)
+    2 (High) -> 1.3 (35% 증가)
     """
-    if level == 2: return 1.3
-    elif level == 1: return 1.1
+    if level == 2: return 1.35
+    elif level == 1: return 1.2
     else: return 1.0
 
 def get_wait_weight(level):
