@@ -898,16 +898,56 @@ if __name__ == "__main__":
         print("❌ 'places_전체_통합.xlsx' 파일이 없습니다.")
         exit()
 
+    SEOUL_GU_COORDS = {
+    "강남구": {"lat": 37.514575, "lon": 127.0495556},
+    "강동구": {"lat": 37.52736667, "lon": 127.1258639},
+    "강북구": {"lat": 37.63695556, "lon": 127.0277194},
+    "강서구": {"lat": 37.54815556, "lon": 126.851675},
+    "관악구": {"lat": 37.47538611, "lon": 126.9538444},
+    "광진구": {"lat": 37.53573889, "lon": 127.0845333},
+    "구로구": {"lat": 37.49265, "lon": 126.8895972},
+    "금천구": {"lat": 37.44910833, "lon": 126.9041972},
+    "노원구": {"lat": 37.65146111, "lon": 127.0583889},
+    "도봉구": {"lat": 37.66583333, "lon": 127.0495222},
+    "동대문구": {"lat": 37.571625, "lon": 127.0421417},
+    "동작구": {"lat": 37.50965556, "lon": 126.941575},
+    "마포구": {"lat": 37.56070556, "lon": 126.9105306},
+    "서대문구": {"lat": 37.57636667, "lon": 126.9388972},
+    "서초구": {"lat": 37.48078611, "lon": 127.0348111},
+    "성동구": {"lat": 37.56061111, "lon": 127.039},
+    "성북구": {"lat": 37.58638333, "lon": 127.0203333},
+    "송파구": {"lat": 37.51175556, "lon": 127.1079306},
+    "양천구": {"lat": 37.51423056, "lon": 126.8687083},
+    "영등포구": {"lat": 37.52361111, "lon": 126.8983417},
+    "용산구": {"lat": 37.53609444, "lon": 126.9675222},
+    "은평구": {"lat": 37.59996944, "lon": 126.9312417},
+    "종로구": {"lat": 37.57037778, "lon": 126.9816417},
+    "중구": {"lat": 37.56100278, "lon": 126.9996417},
+    "중랑구": {"lat": 37.60380556, "lon": 127.0947778},
+    }
+
     area = input("여행할 지역을 입력하세요 (예: 종로구): ")
+
+    if area not in SEOUL_GU_COORDS:
+        raise ValueError("서울 구 이름이 아닙니다.")
+    
+    center_lat = SEOUL_GU_COORDS[area]["lat"]
+    center_lon = SEOUL_GU_COORDS[area]["lon"]
+
+    df["distance_km"] = df.apply(lambda r: haversine(center_lat, center_lon, r["lat"], r["lng"]), axis=1)
+    RADIUS_KM = 6
     
     # 2. 장소 필터링
-    area_mask = df["area"].str.contains(area, na=False)
+    area_mask = df[df["distance_km"] <= RADIUS_KM].copy()
+    print(f"\n📍 {area} 중심 반경 {RADIUS_KM}km 이내 장소 수: {len(area_mask)}")
+    
+    dist_mask = df["distance_km"] <= RADIUS_KM
 
-    filtered_spot = df[area_mask & (df["category"] != "음식점") & (df["category"] != "숙박")][["name", "lat", "lng"]]
+    filtered_spot = df[dist_mask & (df["category"] != "음식점") & (df["category"] != "숙박")][["name", "lat", "lng"]]
 
-    filtered_restaurant = df[area_mask & (df["category"] == "음식점")][["name", "lat", "lng"]]
+    filtered_restaurant = df[dist_mask & (df["category"] == "음식점")][["name", "lat", "lng"]]
 
-    filtered_accom = df[area_mask & (df["category"] == "숙박")][["name", "lat", "lng"]]
+    filtered_accom = df[dist_mask & (df["category"] == "숙박")][["name", "lat", "lng"]]
 
     places = filtered_spot.to_dict(orient="records")
     print(len(places), "개의 관광지가 선택되었습니다.")
