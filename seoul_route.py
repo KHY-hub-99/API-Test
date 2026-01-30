@@ -2,13 +2,12 @@ import os
 import multiprocessing
 
 available_cores = multiprocessing.cpu_count()
-JAVA_PARALLELISM = 1
-print(f"⚙️  설정된 사용 코어 수: {JAVA_PARALLELISM}개")
+JAVA_PARALLELISM = max(2, available_cores // 2)
+print(f"⚙️  Java 내부 병렬성 설정: {JAVA_PARALLELISM}개")
 os.environ["JAVA_HOME"] = r"C:\Program Files\Java\jdk-21.0.10"
 os.environ["JAVA_OPTS"] = f"-Xmx8G -Djava.util.concurrent.ForkJoinPool.common.parallelism={JAVA_PARALLELISM}"
 
 from google import genai
-from google.genai import types
 import zipfile
 import json
 import pandas as pd
@@ -252,26 +251,14 @@ def get_r5py_matrix(nodes, departure_time):
 
 
 def make_cache_key(start_node, end_node, departure_time):
-    # 1. 이름 가져오기
-    s_name = start_node.get("name", str(start_node.get("id")))
-    e_name = end_node.get("name", str(end_node.get("id")))
-
-    # 2. 좌표도 가져오기 (좌표가 없으면 'None' 문자열 처리)
-    s_coord = f"{start_node.get('lat')}_{start_node.get('lng')}"
-    e_coord = f"{end_node.get('lat')}_{end_node.get('lng')}"
-    
-    # 3. 이름과 좌표를 모두 섞어서 키 생성 (절대 중복 안 됨)
-    # 키 예시: ('스타벅스_37.11_127.00', '회사_37.44_127.11', 14)
-    return (f"{s_name}_{s_coord}", f"{e_name}_{e_coord}", int(departure_time.hour))
+    """캐시 키 생성을 일관성 있게 관리"""
+    s_id = start_node.get("id")
+    e_id = end_node.get("id")
+    # 좌표 기반 유니크성 확보를 위해 ID와 시간대 조합
+    return (s_id, e_id, departure_time.hour)
 
 
 def get_all_detailed_paths(trip_legs, departure_time):
-    """
-    trip_legs: [(start_node, end_node), ...]
-    안전 조치:
-      - 좌표가 없는 노드(예: 고정일정)는 r5py 요청 대상에서 제외
-      - 좌표 없는 구간에 대해선 폴백 경로(fallback)를 만들어 path_map에 넣음
-    """
     if not trip_legs: return {}
     path_map = {}
     origins_list, dests_list = [], []
@@ -280,16 +267,16 @@ def get_all_detailed_paths(trip_legs, departure_time):
     for start_node, end_node in trip_legs:
         if start_node['id'] == end_node['id']: continue
 
-        cache_key = make_cache_key(start_node, end_node, departure_time)
-        if cache_key in DETAILED_PATH_CACHE:
-            path_map[(int(start_node['id']), int(end_node['id']))] = DETAILED_PATH_CACHE[cache_key]
+        ckey = make_cache_key(start_node, end_node, departure_time)
+        if ckey in DETAILED_PATH_CACHE:
+            path_map[(start_node['id'], end_node['id'])] = DETAILED_PATH_CACHE[ckey]
             continue
 
         # 좌표가 없으면 r5 요청을 만들지 않고 폴백으로 채움
         if start_node.get('lat') is None or end_node.get('lat') is None:
-            fallback_entry = {"fastest": [f"이동(좌표없음) : {FALLBACK_MOVE_MIN}분"], "min_transfer": [f"이동(좌표없음) : {FALLBACK_MOVE_MIN}분"]}
-            DETAILED_PATH_CACHE[cache_key] = fallback_entry
-            path_map[(int(start_node['id']), int(end_node['id']))] = fallback_entry
+            fallback = {"fastest": [f"이동(좌표없음) : {FALLBACK_MOVE_MIN}분"], 
+                        "min_transfer": [f"이동(좌표없음) : {FALLBACK_MOVE_MIN}분"]}
+            path_map[(start_node['id'], end_node['id'])] = fallback
             continue
 
         # 좌표가 모두 있으면 r5 요청 대상에 추가
@@ -757,7 +744,7 @@ if __name__ == "__main__":
     print(f"\n🚀 병렬 최적화 시작: {len(day_keys)}일치 일정을 동시에 계산합니다.")
     start_total_opt = time.time()
 
-    # [내부 함수] 병렬 처리를 위한 래퍼 함수
+    # 6-1. 병렬 실행 인자(Task) 준비
     def process_day_wrapper(args):
         day_key, date_obj, is_first, is_last = args
         
@@ -778,7 +765,6 @@ if __name__ == "__main__":
         )
         return day_key, day_res
 
-    # 6-1. 병렬 실행 인자(Task) 준비
     tasks = []
     curr = start
     for i, day_key in enumerate(day_keys):
@@ -787,16 +773,13 @@ if __name__ == "__main__":
 
     # 6-2. ThreadPoolExecutor로 병렬 실행
     processed_results = {}
-    
-    if available_cores >= days * 2:
-        available_cores = days * 2
-    else:
-        available_cores = available_cores - 2
 
-    print(f"⚙️ 최대 {available_cores}개 코어로 병렬 처리 중...")
+    max_workers = min(days, 4)
+    print(f"⚙️ 최대 {max_workers}개 코어로 병렬 처리 중...")
 
-    with ThreadPoolExecutor(max_workers=available_cores) as executor:
-        for day_key, day_res in executor.map(process_day_wrapper, tasks):
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        results = list(executor.map(process_day_wrapper, tasks))
+        for day_key, day_res in results:
             processed_results[day_key] = day_res
             print(f"   ✅ {day_key} 완료")
 
