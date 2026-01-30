@@ -426,7 +426,7 @@ def build_nodes(places, restaurants, fixed_events, day_start_dt):
             "type": "spot"
         })
 
-    if restaurants:
+    if len(restaurants) >= 2:
         nodes.append({
             "name": restaurants[0]["name"], 
             "category": "음식점", 
@@ -436,15 +436,17 @@ def build_nodes(places, restaurants, fixed_events, day_start_dt):
             "stay": 70, 
             "type": "lunch"
         })
-        nodes.append({
-            "name": restaurants[0]["name"], 
-            "category": "음식점", 
-            "category2": restaurants[0].get("category2", "식당"), # category2 추가
-            "lat": restaurants[0].get("lat"), 
-            "lng": restaurants[0].get("lng"), 
-            "stay": 70, 
-            "type": "dinner"
-        })
+        dinner_idx = 1 if restaurants[0]["name"] != restaurants[1]["name"] else 2
+        if len(restaurants) > dinner_idx:
+            nodes.append({
+                "name": restaurants[1]["name"], 
+                "category": "음식점", 
+                "category2": restaurants[1].get("category2", "식당"), # category2 추가
+                "lat": restaurants[1].get("lat"), 
+                "lng": restaurants[1].get("lng"), 
+                "stay": 70, 
+                "type": "dinner"
+            })
 
     nodes.extend(build_fixed_nodes(fixed_events, day_start_dt))
     return nodes
