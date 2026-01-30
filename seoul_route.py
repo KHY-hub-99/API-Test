@@ -416,11 +416,35 @@ def build_nodes(places, restaurants, fixed_events, day_start_dt):
     nodes.append({"name": "시작점", "category": "출발", "lat": first_place["lat"], "lng": first_place["lng"], "stay": 0, "type": "depot"})
 
     for p in places:
-        nodes.append({"name": p["name"], "category": p["category"], "lat": p.get("lat"), "lng": p.get("lng"), "stay": stay_time_map.get(p["category"], 60), "type": "spot"})
+        nodes.append({
+            "name": p["name"], 
+            "category": p["category"], 
+            "category2": p.get("category2", ""), # category2 추가
+            "lat": p.get("lat"), 
+            "lng": p.get("lng"), 
+            "stay": stay_time_map.get(p["category"], 60), 
+            "type": "spot"
+        })
 
     if restaurants:
-        nodes.append({"name": restaurants[0]["name"], "category": "음식점", "lat": restaurants[0].get("lat"), "lng": restaurants[0].get("lng"), "stay": 70, "type": "lunch"})
-        nodes.append({"name": restaurants[1]["name"], "category": "음식점", "lat": restaurants[1].get("lat"), "lng": restaurants[1].get("lng"), "stay": 70, "type": "dinner"})
+        nodes.append({
+            "name": restaurants[0]["name"], 
+            "category": "음식점", 
+            "category2": restaurants[0].get("category2", "식당"), # category2 추가
+            "lat": restaurants[0].get("lat"), 
+            "lng": restaurants[0].get("lng"), 
+            "stay": 70, 
+            "type": "lunch"
+        })
+        nodes.append({
+            "name": restaurants[0]["name"], 
+            "category": "음식점", 
+            "category2": restaurants[0].get("category2", "식당"), # category2 추가
+            "lat": restaurants[0].get("lat"), 
+            "lng": restaurants[0].get("lng"), 
+            "stay": 70, 
+            "type": "dinner"
+        })
 
     nodes.extend(build_fixed_nodes(fixed_events, day_start_dt))
     return nodes
@@ -594,6 +618,7 @@ def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_
             timeline.append({
                 "name": node["name"],
                 "category": node["category"],
+                "category2": node.get("category2", node["category"]), # category2 저장 (없으면 category로 폴백)
                 "time": time_str,
                 "transit_to_here": transit_info
             })
@@ -633,16 +658,16 @@ if __name__ == "__main__":
 
     dist_mask = df["distance_km"] <= RADIUS_KM
 
-    filtered_spot = df[dist_mask & (df["category"] != "음식점") & (df["category"] != "숙박")][["name", "lat", "lng", "category2"]]
+    filtered_spot = df[dist_mask & (df["category"] != "음식점") & (df["category"] != "숙박")][["name", "lat", "lng", "category", "category2"]]
 
     avg_lat = filtered_spot["lat"].mean()
     avg_lng = filtered_spot["lng"].mean()
 
     # 관광지 중심 1.5km 이내 식당만 추출 (훨씬 타이트한 동선)
     df["dist_to_center"] = df.apply(lambda r: haversine(avg_lat, avg_lng, r["lat"], r["lng"]), axis=1)
-    filtered_restaurant = df[(df["dist_to_center"] <= 3) & (df["category"] == "음식점")][["name", "lat", "lng", "category2"]]
+    filtered_restaurant = df[(df["dist_to_center"] <= 3) & (df["category"] == "음식점")][["name", "lat", "lng", "category", "category2"]]
 
-    filtered_accom = df[dist_mask & (df["category"] == "숙박")][["name", "lat", "lng", "category2"]]
+    filtered_accom = df[dist_mask & (df["category"] == "숙박")][["name", "lat", "lng", "category", "category2"]]
 
     places = filtered_spot.to_dict(orient="records")
     print(len(places), "개의 관광지가 선택되었습니다.")
@@ -662,62 +687,62 @@ if __name__ == "__main__":
     days = (end - start).days + 1
     print(f"총 여행 일수: {days}일")
 
-    # 4. Gemini API 호출 (1차 계획 생성)
-    schema = """
-    {
-      "plans": {
-        "day1": {
-          "route": [
-            {"name": "...", "category": "...", "lat": 0.0, "lng": 0.0}
-          ],
-          "restaurants": [
-            {"name": "...", "category": "...", "lat": 0.0, "lng": 0.0}
-          ],
-          "accommodations": [
-            {"name": "...", "category": "...", "lat": 0.0, "lng": 0.0}
-          ]
-        }
-      }
-    }
-    """
+    # # 4. Gemini API 호출 (1차 계획 생성)
+    # schema = """
+    # {
+    #   "plans": {
+    #     "day1": {
+    #       "route": [
+    #         {"name": "...", "category": "...", "category2": "...", "lat": 0.0, "lng": 0.0}
+    #       ],
+    #       "restaurants": [
+    #         {"name": "...", "category": "...", "category2": "...", "lat": 0.0, "lng": 0.0}
+    #       ],
+    #       "accommodations": [
+    #         {"name": "...", "category": "...", "category2": "...", "lat": 0.0, "lng": 0.0}
+    #       ]
+    #     }
+    #   }
+    # }
+    # """
     
-    system_prompt = f"""
-    너는 '서울 여행 장소 추천 전문가'이다. 반드시 제공된 데이터만을 사용하여 계획을 세운다.
-    {schema}
-    [절대 규칙]
-    1. 모든 장소의 이름, 좌표(lat, lng), 카테고리는 입력된 데이터와 100% 일치해야 한다. 절대 값을 수정하거나 새로운 좌표를 생성하지 마라.
-    2. 'route' 배열: 오직 제공된 'places' 목록에서 5개를 선택하여 담는다.
-    3. 'restaurants' 배열: 오직 제공된 'restaurants' 목록에서 2개를 선택한다.
-    4. 'accommodations' 배열: 오직 제공된 'accommodations' 목록에서 1개를 선택한다. (마지막 날은 빈 배열 []로 출력)
-    5. 할루시네이션 방지: 목록에 없는 장소나 좌표를 출력할 경우 시스템 오류로 간주한다.
-    6. 출력 형식: 반드시 순수 JSON 데이터만 출력하며, 설명이나 추가 텍스트를 절대 포함하지 않는다.
-    """
+    # system_prompt = f"""
+    # 너는 '서울 여행 장소 추천 전문가'이다. 반드시 제공된 데이터만을 사용하여 계획을 세운다.
+    # {schema}
+    # [절대 규칙]
+    # 1. 모든 장소의 이름, 좌표(lat, lng), 카테고리는 입력된 데이터와 100% 일치해야 한다. 절대 값을 수정하거나 새로운 좌표를 생성하지 마라.
+    # 2. 'route' 배열: 오직 제공된 'places' 목록에서 5개를 선택하여 담는다.
+    # 3. 'restaurants' 배열: 오직 제공된 'restaurants' 목록에서 2개를 선택한다.
+    # 4. 'accommodations' 배열: 오직 제공된 'accommodations' 목록에서 1개를 선택한다. (마지막 날은 빈 배열 []로 출력)
+    # 5. 할루시네이션 방지: 목록에 없는 장소나 좌표를 출력할 경우 시스템 오류로 간주한다.
+    # 6. 출력 형식: 반드시 순수 JSON 데이터만 출력하며, 설명이나 추가 텍스트를 절대 포함하지 않는다.
+    # """
 
-    user_prompt = {
-        "days": days,
-        "start_location": {"lat": 37.5547, "lng": 126.9706},
-        "places": places, # [:6 * days * 4]
-        "restaurants": restaurants, # [:3 * days * 4]
-        "accommodations": accommodations # [:days * 4]
-    }
+    # user_prompt = {
+    #     "days": days,
+    #     "start_location": {"lat": 37.5547, "lng": 126.9706},
+    #     "places": places, # [:6 * days * 4]
+    #     "restaurants": restaurants, # [:3 * days * 4]
+    #     "accommodations": accommodations # [:days * 4]
+    # }
 
-    print("🤖 Gemini가 초기 계획을 생성하고 있습니다...")
-    prompt = system_prompt + "\n\n" + json.dumps(user_prompt, ensure_ascii=False)
+    # print("🤖 Gemini가 초기 계획을 생성하고 있습니다...")
+    # prompt = system_prompt + "\n\n" + json.dumps(user_prompt, ensure_ascii=False)
     
-    start_time = time.time()
-    response = client.models.generate_content(model="gemini-2.5-flash-lite", contents=prompt, config={"temperature": 0})
-    print(f"⏱ Gemini 응답 시간: {round(time.time() - start_time, 3)}초")
+    # start_time = time.time()
+    # response = client.models.generate_content(model="gemini-2.5-flash-lite", contents=prompt, config={"temperature": 0})
+    # print(f"⏱ Gemini 응답 시간: {round(time.time() - start_time, 3)}초")
 
-    try:
-        result = extract_json(response.text)
-        # result.json 저장 (백업용)
-        with open("result.json", "w", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"❌ JSON 파싱 실패: {e}")
-        exit()
+    # try:
+    #     result = extract_json(response.text)
+    #     # result.json 저장 (백업용)
+    #     with open("result.json", "w", encoding="utf-8") as f:
+    #         json.dump(result, f, ensure_ascii=False, indent=2)
+    # except Exception as e:
+    #     print(f"❌ JSON 파싱 실패: {e}")
+    #     exit()
 
-    # result = json.load(open("result.json", "r", encoding="utf-8"))
+    result = json.load(open("result.json", "r", encoding="utf-8"))
 
     # 5. 세부 일정 설정
     first_day_start_str = input("여행 첫날 시작 시간 (예: 14:00) : ").strip() or "10:00"
@@ -803,10 +828,12 @@ if __name__ == "__main__":
 
             for t in timeline:
                 if t.get('transit_to_here'):
-                    # 리스트 형태의 경로를 화살표로 연결하여 출력
                     path_str = " -> ".join([s for s in t['transit_to_here']])
                     print(f"  [TRANSIT] {path_str}")
-                print(f"  [{t['time']}] {t['name']} ({t['category']})")
+                
+                # category 대신 category2 출력
+                display_cat = t.get('category2', t['category'])
+                print(f"  [{t['time']}] {t['name']} ({display_cat})")
             
             print(separator)
 
