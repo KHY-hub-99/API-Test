@@ -1,33 +1,109 @@
-import os
+import os, pickle, re, time, math, json, zipfile, joblib
 import multiprocessing
-import joblib  # 모델 로드를 위해 추가
-import numpy as np # 데이터 처리를 위해 추가
 
 available_cores = multiprocessing.cpu_count()
-JAVA_PARALLELISM = 1
-print(f"⚙️  설정된 사용 코어 수: {JAVA_PARALLELISM}개")
-# JAVA_HOME 경로는 사용자 환경에 맞게 확인 필요
+JAVA_PARALLELISM = max(2, available_cores // 2)
+print(f"⚙️  Java 내부 병렬성 설정: {JAVA_PARALLELISM}개")
 os.environ["JAVA_HOME"] = r"C:\Program Files\Java\jdk-21.0.10"
 os.environ["JAVA_OPTS"] = f"-Xmx8G -Djava.util.concurrent.ForkJoinPool.common.parallelism={JAVA_PARALLELISM}"
 
 from google import genai
-import zipfile
-import json
 import pandas as pd
 import geopandas as gpd
-import math
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from ortools.constraint_solver import routing_enums_pb2, pywrapcp
-import time
-import re
 from r5py import TransportNetwork, TravelTimeMatrix, DetailedItineraries, TransportMode
-import pickle
 from concurrent.futures import ThreadPoolExecutor
+
+# ============================================================
+# [NEW] 0. 혼잡도 모델 및 설정 로드
+# ============================================================
+print("🧠 혼잡도 예측 모델 로드 중...")
+try:
+    CONGESTION_MODEL = joblib.load('./model/congestion_model_latlon.pkl')
+    # 이전 단계에서 한국어 컬럼명으로 학습했으므로 순서를 맞춰줍니다.
+    # ['month', 'day', 'hour', 'dayofweek', 'is_holiday', 'is_weekend', '위도', '경도']
+    print("✅ 모델 로드 성공")
+except Exception as e:
+    print(f"⚠️ 모델 로드 실패: {e}")
+    CONGESTION_MODEL = None
+
+# 공휴일 정의 (모델 학습때와 동일하게)
+KOREAN_HOLIDAYS_2026 = [
+    '20260101', # 신정 (목)
+    '20260216', '20260217', '20260218', # 설날 연휴 (월, 화, 수)
+    '20260301', # 삼일절 (일)
+    '20260302', # 삼일절 대체공휴일 (월)
+    '20260505', # 어린이날 (화)
+    '20260524', # 부처님오신날 (일)
+    '20260525', # 부처님오신날 대체공휴일 (월)
+    '20260606', # 현충일 (토)
+    '20260608', # 현충일 대체공휴일 (월) - *관공서 공휴일 규정에 따라 적용 예상
+    '20260815', # 광복절 (토)
+    '20260817', # 광복절 대체공휴일 (월)
+    '20260924', '20260925', '20260926', # 추석 연휴 (목, 금, 토)
+    '20261003', # 개천절 (토)
+    '20261005', # 개천절 대체공휴일 (월)
+    '20261009', # 한글날 (금)
+    '20261225'  # 크리스마스 (금)
+]
+
+def get_congestion_level(lat, lng, dt):
+    """
+    위치와 시간을 받아 혼잡도(0:Low, 1:Med, 2:High)를 반환
+    """
+    if CONGESTION_MODEL is None or lat is None or lng is None:
+        return 0 
+    
+    # 파생 변수 생성
+    month = dt.month
+    day = dt.day
+    hour = dt.hour
+    
+    # [수정] datetime 객체는 .dayofweek 속성이 없으므로 .weekday() 메서드 사용
+    # 월요일=0, ... 일요일=6 (Pandas dayofweek와 동일)
+    dayofweek = dt.weekday() 
+    
+    date_str = dt.strftime('%Y%m%d')
+    
+    # [수정] 2026년 공휴일 리스트 참조 확인
+    is_holiday = 1 if date_str in KOREAN_HOLIDAYS_2026 else 0
+    is_weekend = 1 if dayofweek >= 5 else 0
+    
+    # 입력 데이터 프레임 생성
+    input_vector = pd.DataFrame([[
+        month, day, hour, dayofweek, is_holiday, is_weekend, lat, lng
+    ]], columns=['month', 'day', 'hour', 'dayofweek', 'is_holiday', 'is_weekend', '위도', '경도'])
+    
+    return CONGESTION_MODEL.predict(input_vector)[0]
+
+def get_stay_weight(level):
+    """
+    혼잡도 등급에 따른 시간 가중치 반환
+    0 (Low) -> 1.0 (변화 없음)
+    1 (Med) -> 1.1 (10% 증가)
+    2 (High) -> 1.3 (30% 증가)
+    """
+    if level == 2: return 1.3
+    elif level == 1: return 1.1
+    else: return 1.0
+
+def get_wait_weight(level):
+    """
+    대기 시간 전용 가중치
+    0 (Low) -> 1.0 (변화 없음)
+    1 (Med) -> 1.5 (50% 증가)
+    2 (High) -> 2.0 (2배 증가)
+    """
+    if level == 2: return 2.0
+    elif level == 1: return 1.5
+    else: return 1.0
 
 # ============================================================
 # 1. 환경 설정 및 전역 상수
 # ============================================================ 
+# API 키 설정
 load_dotenv()
 API_KEY = os.getenv("API_KEY")
 client = genai.Client(api_key=API_KEY)
@@ -38,7 +114,7 @@ DETAILED_PATH_CACHE = {}
 # 폴백(좌표 없는 경우) 이동 시간 설정(분)
 FALLBACK_MOVE_MIN = 30
 
-# 도보 이동 제한
+# 도보 이동 제한 (km -> 분 환산 기준 등)
 WALK_ONLY_THRESHOLD_MIN = 12   
 WALK_ONLY_THRESHOLD_MAX = 18   
 
@@ -49,202 +125,44 @@ MAX_TRAVEL_TIME_MIN = 90
 LUNCH_WINDOW = ("11:20", "13:20")
 DINNER_WINDOW = ("17:40", "19:30")
 
+# 장소별 체류 시간
 stay_time_map = {
     "관광지": 90, "카페": 50, "음식점": 70, 
     "박물관": 120, "공원": 60, "시장": 80, "숙박": 0
 }
 
+# 데이터 파일 경로
 osm_file = "./data/seoul_osm_v.pbf"
 gtfs_files = ["./data/seoul_area_gtfs.zip"]
 
-# [추가] 혼잡도 모델 관련 상수 및 가중치
-MODEL_PATH = "./model/seoul_congestion_model.pkl"
-TRAFFIC_WEIGHTS = {0: 1.0, 1: 1.3, 2: 2}  # Low, Medium, High
-CROWD_WEIGHTS = {0: 1.0, 1: 1.1, 2: 1.3}    # Low, Medium, High 
-# [수정] 이모지 매핑 (0:Low, 1:Medium, 2:High)
-EMOJI_MAP = {0: "🟢", 1: "🟡", 2: "🔴"}
-
-
-# [NEW] 제공해주신 교통 지점 좌표 데이터 (유효하지 않은 0.0 좌표 제외)
-TRAFFIC_NODE_COORDS = {
-    "성산로(금화터널)": (37.56859, 126.94844),
-    "사직로(사직터널)": (37.57231, 126.96325),
-    "자하문로(자하문터널)": (37.58883, 126.96855),
-    "대사관로(삼청터널)": (37.59636, 126.98421),
-    "율곡로(안국역)": (37.57600, 126.98434),
-    "창경궁로(서울여자대학교)": (37.58253, 126.99801),
-    "대학로(한국방송통신대학교)": (37.57820, 127.00202),
-    "종로(동묘앞역)": (37.57345, 127.01676),
-    "퇴계로(신당역)": (37.56571, 127.02091),
-    "동호로(장충체육관)": (37.55879, 127.00725),
-    "장충단로(장충단공원)": (37.55689, 127.00466),
-    "퇴계로(회현역)": (37.55743, 126.97649),
-    "세종대로(서울역)": (37.55912, 126.97454),
-    "새문안로(서울역사박물관)": (37.56965, 126.97144),
-    "종로(종로3가역)": (37.57053, 126.99096),
-    "서소문로(시청역)": (37.56272, 126.97307),
-    "세종대로(시청역2)": (37.56750, 126.97721),
-    "을지로(을지로3가역)": (37.56632, 126.98910),
-    "칠패로(숭례문)": (37.55959, 126.97252),
-    "남산1호터널": (37.54241, 127.00136),
-    "남산2호터널": (37.55532, 126.98977),
-    "남산3호터널": (37.54478, 126.98835),
-    "소월로(회현역)": (37.55704, 126.97636),
-    "소파로(숭의여자대학교)": (37.55490, 126.98352),
-    "도봉로(도봉산역)": (37.69179, 127.04509),
-    "동일로(의정부IC)": (37.68857, 127.05538),
-    "아차산로(워커힐)": (37.55010, 127.10841),
-    "망우로(망우리공원)": (37.60148, 127.11567),
-    "경춘북로(중랑경찰서)": (37.61994, 127.10533),
-    "화랑로(조선왕릉)": (37.63088, 127.09911),
-    "북부간선도로(신내IC)": (37.61400, 127.10836),
-    "서하남로(서하남IC)": (37.51684, 127.14690),
-    "천호대로(상일IC)": (37.54746, 127.17522),
-    "올림픽대로(강일IC)": (37.56708, 127.14080),
-    "경부고속도로(양재IC)": (37.46516, 127.03868),
-    "송파대로(복정역)": (37.46816, 127.12651),
-    "밤고개로(세곡동사거리)": (37.46242, 127.10788),
-    "분당수서로(성남시계)": (37.47103, 127.12321),
-    "과천대로(남태령역)": (37.46329, 126.98815),
-    "양재대로(양재IC)": (37.46009, 127.03018),
-    "반포대로(우면산터널)": (37.48372, 127.01184),
-    "시흥대로(석수역)": (37.43701, 126.90281),
-    "금오로(광명시계)": (37.48243, 126.84189),
-    "오리로(광명시계)": (37.48261, 126.84311),
-    "개봉로(개봉교)": (37.48618, 126.85650),
-    "광명대교(광명시계)": (37.48504, 126.87330),
-    "철산교(광명시계)": (37.47510, 126.87835),
-    "금천교(광명시계)": (37.46517, 126.88425),
-    "금하로(광명시계)": (37.45135, 126.89169),
-    "오정로(부천시계)": (37.54278, 126.80941),
-    "화곡로(화곡로입구)": (37.53935, 126.82308),
-    "경인고속국도(신월IC)": (37.52485, 126.83186),
-    "경인로(유한공고)": (37.48861, 126.82279),
-    "신정로(작동터널)": (37.50607, 126.82458),
-    "김포대로(개화교)": (37.58531, 126.79557),
-    "올림픽대로(개화IC)": (37.58776, 126.81297),
-    "통일로(고양시계)": (37.64469, 126.91127),
-    "서오릉로(고양시계)": (37.61788, 126.90626),
-    "수색로(고양시계)": (37.58747, 126.88641),
-    "강변북로(난지한강공원)": (37.57089, 126.87256),
-    "강변북로(구리시계)": (37.55827, 127.11420),
-    "동부간선도로(상도지하차도)": (37.68325, 127.05253),
-    "행주대교": (37.59812, 126.80993),
-    "월드컵대교": (37.55647, 126.88551),
-    "가양대교": (37.57157, 126.86273),
-    "성산대교": (37.54820, 126.88895),
-    "양화대교": (37.54279, 126.90349),
-    "서강대교": (37.53736, 126.92526),
-    "마포대교": (37.53360, 126.93658),
-    "원효대교": (37.52424, 126.94046),
-    "한강대교": (37.51811, 126.95929),
-    "동작대교": (37.50976, 126.98181),
-    "반포대교": (37.51462, 126.99667),
-    "잠수교": (37.50826, 126.99974),
-    "한남대교": (37.52711, 127.01328),
-    "동호대교": (37.53814, 127.02001),
-    "성수대교": (37.53685, 127.03511),
-    "영동대교": (37.53041, 127.05746),
-    "청담대교": (37.52840, 127.06544),
-    "잠실대교": (37.52409, 127.09204),
-    "올림픽대교": (37.53387, 127.10423),
-    "천호대교": (37.54267, 127.11288),
-    "광진교": (37.54415, 127.11526),
-    "진흥로(구기터널)": (37.60869, 126.95531),
-    "평창문화로(북악터널)": (37.61155, 126.97931),
-    "동호로(금호터널)": (37.55178, 127.01320),
-    "서빙고로(한남역)": (37.52720, 127.00470),
-    "천호대로(군자교)": (37.56072, 127.06857),
-    "뚝섬로(용비교)": (37.54201, 127.02067),
-    "동일로(군자교)": (37.55381, 127.07050),
-    "화랑로(상월곡역)": (37.60422, 127.04427),
-    "동소문로(길음교사거리)": (37.59921, 127.02177),
-    "화랑로(화랑대역)": (37.61950, 127.08093),
-    "도봉로(쌍문역)": (37.64571, 127.03317),
-    "동부간선도로(월계1교)": (37.63148, 127.06358),
-    "동일로(노원역)": (37.65247, 127.06093),
-    "증산로(디지털미디어시티역)": (37.57968, 126.90512),
-    "통일로(산골고개정류장)": (37.59493, 126.94025),
-    "성산로(연희IC)": (37.56351, 126.93010),
-    "연희로(연희IC)": (37.56626, 126.93054),
-    "남부순환로(화곡로입구 교차로)": (37.53997, 126.82539),
-    "남부순환로(신월IC)": (37.52277, 126.83643),
-    "강서로(화곡터널)": (37.53446, 126.84511),
-    "공항대로(발산역)": (37.55902, 126.83178),
-    "경인로(오류IC)": (37.49798, 126.85170),
-    "경인로(거리공원입구교차로)": (37.50644, 126.88438),
-    "시흥대로(시흥IC)": (37.47753, 126.89904),
-    "영등포로(오목교)": (37.52318, 126.88373),
-    "시흥대로(구로디지털단지역)": (37.48741, 126.90545),
-    "국회대로(여의2교)": (37.52665, 126.91333),
-    "경인로(서울교)": (37.52019, 126.91490),
-    "여의대방로(여의교)": (37.51684, 126.92838),
-    "양녕로(상도터널)": (37.51120, 126.95347),
-    "동작대로(총신대입구역)": (37.49435, 126.98291),
-    "문성로(난곡터널)": (37.47905, 126.92425),
-    "남부순환로(낙성대역)": (37.47771, 126.96224),
-    "남부순환로(예술의전당)": (37.47622, 127.00482),
-    "강남대로(강남역-신분당)": (37.49069, 127.03116),
-    "사평대로(고속터미널역)": (37.50323, 127.00596),
-    "반포대로(서초역)": (37.49624, 127.00555),
-    "언주로(매봉터널)": (37.49201, 127.04797),
-    "남부순환로(수서IC)": (37.49610, 127.09103),
-    "헌릉로(세곡동사거리)": (37.46516, 127.10576),
-    "노들로(여의하류IC)": (37.52965, 126.90915),
-    "테헤란로(선릉역)": (37.50548, 127.05213),
-    "강남대로(신사역)": (37.51480, 127.02013),
-    "백제고분로(종합운동장)": (37.51064, 127.07856),
-    "송파대로(송파역)": (37.50003, 127.11218),
-    "서부간선도로(지상)": (37.52097, 126.88183),
-    "올림픽대로": (37.50600, 126.97375),
-    "강변북로": (37.51700, 126.97412),
-    "내부순환로": (37.60868, 126.99888),
-    "북부간선로": (37.60856, 127.05258),
-    "동부간선도로": (37.56869, 127.07602),
-    "경부고속도로": (37.49321, 127.02252),
-    "분당수서로": (37.49770, 127.08720),
-    "강남순환로(관악터널)": (37.44910, 126.92617),
-    "서부간선지하도로": (37.46894, 126.88367),
-    "신월여의지하도로": (37.52932, 126.86228)
+# 서울 구별 중심 좌표
+SEOUL_GU_COORDS = {
+"강남구": {"lat": 37.514575, "lon": 127.0495556},
+"강동구": {"lat": 37.52736667, "lon": 127.1258639},
+"강북구": {"lat": 37.63695556, "lon": 127.0277194},
+"강서구": {"lat": 37.54815556, "lon": 126.851675},
+"관악구": {"lat": 37.47538611, "lon": 126.9538444},
+"광진구": {"lat": 37.53573889, "lon": 127.0845333},
+"구로구": {"lat": 37.49265, "lon": 126.8895972},
+"금천구": {"lat": 37.44910833, "lon": 126.9041972},
+"노원구": {"lat": 37.65146111, "lon": 127.0583889},
+"도봉구": {"lat": 37.66583333, "lon": 127.0495222},
+"동대문구": {"lat": 37.571625, "lon": 127.0421417},
+"동작구": {"lat": 37.50965556, "lon": 126.941575},
+"마포구": {"lat": 37.56070556, "lon": 126.9105306},
+"서대문구": {"lat": 37.57636667, "lon": 126.9388972},
+"서초구": {"lat": 37.48078611, "lon": 127.0348111},
+"성동구": {"lat": 37.56061111, "lon": 127.039},
+"성북구": {"lat": 37.58638333, "lon": 127.0203333},
+"송파구": {"lat": 37.51175556, "lon": 127.1079306},
+"양천구": {"lat": 37.51423056, "lon": 126.8687083},
+"영등포구": {"lat": 37.52361111, "lon": 126.8983417},
+"용산구": {"lat": 37.53609444, "lon": 126.9675222},
+"은평구": {"lat": 37.59996944, "lon": 126.9312417},
+"종로구": {"lat": 37.57037778, "lon": 126.9816417},
+"중구": {"lat": 37.56100278, "lon": 126.9996417},
+"중랑구": {"lat": 37.60380556, "lon": 127.0947778},
 }
-
-KOREAN_HOLIDAYS_2025 = {
-    '20250101': '신정', '20250128': '설날연휴', '20250129': '설날', '20250130': '설날연휴',
-    '20250301': '삼일절', '20250303': '대체공휴일', '20250505': '어린이날',
-    '20250506': '대체공휴일', '20250606': '현충일', '20250815': '광복절',
-    '20251003': '개천절', '20251005': '추석연휴', '20251006': '추석',
-    '20251007': '추석연휴', '20251008': '대체공휴일', '20251009': '한글날',
-    '20251225': '크리스마스'
-}
-
-SEOUL_WEATHER_2025 = {
-    1: {'temp': -2, 'rain_prob': 15}, 2: {'temp': 1, 'rain_prob': 15},
-    3: {'temp': 6, 'rain_prob': 25}, 4: {'temp': 13, 'rain_prob': 30},
-    5: {'temp': 18, 'rain_prob': 35}, 6: {'temp': 23, 'rain_prob': 50},
-    7: {'temp': 26, 'rain_prob': 60}, 8: {'temp': 27, 'rain_prob': 45},
-    9: {'temp': 22, 'rain_prob': 35}, 10: {'temp': 15, 'rain_prob': 25},
-    11: {'temp': 7, 'rain_prob': 20}, 12: {'temp': 0, 'rain_prob': 20}
-}
-
-ROAD_CAPACITY_DEFAULT = {
-    '터널': 2500, '대로': 2000, '로': 1500, '역': 1800, 'default': 1600
-}
-
-# [추가] 전역 변수로 모델 로드
-try:
-    if os.path.exists(MODEL_PATH):
-        print(f"📦 혼잡도 모델 로드 중: {MODEL_PATH}")
-        loaded_package = joblib.load(MODEL_PATH)
-        TRAFFIC_MODEL = loaded_package['traffic_model']
-        CROWD_MODEL = loaded_package['crowd_model']
-        LOCATION_MAP = loaded_package['location_map']
-        print("✅ 모델 로드 완료")
-    else:
-        print("⚠️ 경고: 혼잡도 모델 파일이 없습니다. 가중치가 적용되지 않습니다.")
-        TRAFFIC_MODEL, CROWD_MODEL, LOCATION_MAP = None, None, {}
-except Exception as e:
-    print(f"❌ 모델 로드 실패: {e}")
-    TRAFFIC_MODEL, CROWD_MODEL, LOCATION_MAP = None, None, {}
 
 # ============================================================
 # 2. 유틸리티 함수
@@ -261,6 +179,7 @@ def haversine(lat1, lon1, lat2, lon2):
     return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 def approx_walk_minutes(start, end):
+    # start/end가 좌표 없음(None)일 수 있으므로 안전 처리
     if not start or not end or start.get("lat") is None or end.get("lat") is None:
         return FALLBACK_MOVE_MIN
     dist_km = haversine(start["lat"], start["lng"], end["lat"], end["lng"])
@@ -272,6 +191,7 @@ def dynamic_walk_threshold(dist_km):
     else: return WALK_ONLY_THRESHOLD_MIN
 
 def travel_minutes(p1, p2):
+    # 좌표가 없으면 0을 반환(상위 로직에서 고정일정 보정으로 최소 시간 적용됨)
     if p1 is None or p2 is None or p1.get("lat") is None or p2.get("lat") is None: return 0
     dist = haversine(p1["lat"], p1["lng"], p2["lat"], p2["lng"])
     return int(dist / 30 * 60)
@@ -289,156 +209,76 @@ def duration_to_minutes(val):
     except: return 0
 
 def extract_json(text):
-    if not text: raise ValueError("Gemini 응답이 비어있습니다.")
+    if not text:
+        raise ValueError("Gemini 응답이 비어있습니다.")
     text = text.strip()
     if text.startswith("```"):
         text = text.split("```")[1]
-        if text.startswith("json"): text = text[4:]
-    start, end = text.find("{"), text.rfind("}") + 1
-    if start == -1 or end == -1: raise ValueError("JSON 파싱 실패:\n" + text)
+        if text.startswith("json"):
+            text = text[4:]
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start == -1 or end == -1:
+        raise ValueError("JSON 파싱 실패:\n" + text)
     return json.loads(text[start:end])
-
-# [추가] 혼잡도 예측을 위한 헬퍼 함수들
-def get_road_capacity_val(name):
-    name = str(name)
-    if '터널' in name: return 2500
-    if '대로' in name: return 2000
-    if '역' in name: return 1800
-    if '로' in name: return 1500
-    return 1600
-
-# [NEW] 가장 가까운 교통 지점 찾기
-def find_nearest_traffic_node(target_lat, target_lng, max_dist_km=2.0):
-    if target_lat is None or target_lng is None:
-        return None
-        
-    nearest_node = None
-    min_dist = float('inf')
-
-    for name, (node_lat, node_lng) in TRAFFIC_NODE_COORDS.items():
-        # 모델에 존재하는 지점인지 확인
-        if TRAFFIC_MODEL is not None and LOCATION_MAP and name not in LOCATION_MAP:
-            continue
-            
-        dist = haversine(target_lat, target_lng, node_lat, node_lng)
-        
-        if dist < min_dist:
-            min_dist = dist
-            nearest_node = name
-
-    if min_dist <= max_dist_km:
-        return nearest_node
-    else:
-        return None
-
-# [MODIFIED] 예측 함수 (좌표 기반 매핑 추가)
-def predict_congestion_weights(location_name, current_dt, lat=None, lng=None):
-    if TRAFFIC_MODEL is None or not LOCATION_MAP:
-        return 1.0, 1.0, "⚪", "⚪"
-
-    target_name = None
-
-    # 1. 이름 일치 확인
-    if location_name in LOCATION_MAP:
-        target_name = location_name
-    
-    # 2. 좌표 기반 매핑 (이름 불일치 시)
-    if target_name is None and lat is not None and lng is not None:
-        found_node = find_nearest_traffic_node(lat, lng)
-        if found_node:
-            target_name = found_node
-
-    if target_name is None:
-        return 1.0, 1.0, "⚪", "⚪"
-
-    hour = current_dt.hour
-    month = current_dt.month
-    day_of_week = current_dt.weekday() 
-    date_str = current_dt.strftime("%Y%m%d")
-    
-    is_holiday = 1 if date_str in KOREAN_HOLIDAYS_2025 else 0
-    is_weekend = 1 if day_of_week >= 5 else 0
-    
-    weather = SEOUL_WEATHER_2025.get(month, SEOUL_WEATHER_2025[1])
-    rain_prob = weather['rain_prob']
-    temp = weather['temp']
-    
-    rng = np.random.RandomState(month * 100 + hour)
-    is_raining = 1 if rng.rand() < (rain_prob / 100) else 0
-    weather_impact = 1.3 if is_raining else 1.0
-    if is_raining: rain_prob = 80
-
-    road_cap = get_road_capacity_val(target_name)
-    loc_code = LOCATION_MAP[target_name]
-
-    input_data = pd.DataFrame([{
-        'location_code': loc_code,
-        'hour': hour,
-        'day_of_week': day_of_week,
-        'month': month,
-        'is_weekend': is_weekend,
-        'is_holiday': is_holiday,
-        'temperature': temp,
-        'rain_prob': rain_prob,
-        'weather_impact': weather_impact,
-        'road_capacity': road_cap
-    }])
-
-    try:
-        t_level = TRAFFIC_MODEL.predict(input_data)[0]
-        c_level = CROWD_MODEL.predict(input_data)[0]
-        
-        t_weight = TRAFFIC_WEIGHTS.get(t_level, 1.0)
-        c_weight = CROWD_WEIGHTS.get(c_level, 1.0)
-        
-        # [수정] 이모지로 반환
-        t_emoji = EMOJI_MAP.get(t_level, "⚪")
-        c_emoji = EMOJI_MAP.get(c_level, "⚪")
-        
-        return t_weight, c_weight, t_emoji, c_emoji
-    except Exception as e:
-        return 1.0, 1.0, "⚪", "⚪"
 
 # ============================================================
 # 3. 교통 데이터 로드 (GTFS & OSM)
 # ============================================================
-
-# 3-1. TransportNetwork (기존 유지)
 pickle_path = "./data/seoul_tn_cached.pkl"
 if os.path.exists(pickle_path):
-    print(f"📦 TransportNetwork 로드 중...")
-    transport_network = TransportNetwork.__new__(TransportNetwork)
-    transport_network._transport_network = TransportNetwork._load_pickled_transport_network(self=TransportNetwork, path=pickle_path)
+    print(f"📦 TransportNetwork 캐시 로드 중...")
+    try:
+        # 안전한 로딩을 위해 클래스 메서드 대신 직접 로드 시도
+        with open(pickle_path, 'rb') as f:
+            transport_network = pickle.load(f)
+    except Exception:
+        # 구버전 pickle 호환 문제 시 재생성
+        transport_network = TransportNetwork.__new__(TransportNetwork)
+        transport_network._transport_network = TransportNetwork._load_pickled_transport_network(transport_network, pickle_path)
 else:
-    print("🚀 TransportNetwork 생성 중...")
+    print("🚀 TransportNetwork 생성 중 (최초 1회)...")
     transport_network = TransportNetwork(osm_file, gtfs_files)
-    transport_network._save_pickled_transport_network(path=pickle_path, transport_network=transport_network)
+    try:
+        # 최신 r5py 방식 저장
+        transport_network.save(pickle_path)
+    except:
+        pass
 
-# 3-2 & 3-3. 메타데이터(Stop/Route) 고속 로드 (Pickle 적용)
-meta_cache_path = "./data/metadata_cache.pkl"
+meta_cache_path = "./data/metadata_cache_v2.pkl" # 파일명 v2로 변경 (캐시 갱신을 위해)
+
+STOP_COORDS = {} # 전역 변수
 
 if os.path.exists(meta_cache_path):
-    print("⚡ 메타데이터 캐시 로드 중...")
+    print("⚡ 메타데이터(좌표포함) 캐시 로드 중...")
     with open(meta_cache_path, "rb") as f:
         meta_data = pickle.load(f)
         STOP_ID_TO_NAME = meta_data["stops"]
         ROUTE_ID_TO_NAME = meta_data["routes"]
         STOP_ROUTE_MAP = meta_data["stop_route_map"]
+        STOP_COORDS = meta_data["coords"] # [NEW] 좌표 로드
 else:
-    print("🐢 메타데이터 생성 중 (최초 1회만 느림)...")
+    print("🐢 메타데이터 생성 중 (좌표 포함)...")
     # Stops
     with zipfile.ZipFile(gtfs_files[0]) as z:
         with z.open("stops.txt") as f:
-            stops_df = pd.read_csv(f, dtype={'stop_id': str})
+            # [NEW] stop_lat, stop_lon 컬럼 추가 로드
+            stops_df = pd.read_csv(f, dtype={'stop_id': str}, usecols=['stop_id', 'stop_name', 'stop_lat', 'stop_lon'])
+    
     STOP_ID_TO_NAME = {str(row['stop_id']).strip(): str(row['stop_name']).strip() for _, row in stops_df.iterrows()}
     
-    # Routes
+    # [NEW] 정류장 ID -> 좌표 매핑 생성
+    for _, row in stops_df.iterrows():
+        s_id = str(row['stop_id']).strip()
+        STOP_COORDS[s_id] = {'lat': row['stop_lat'], 'lng': row['stop_lon']}
+    
+    # Routes (기존 동일)
     with zipfile.ZipFile(gtfs_files[0]) as z:
         with z.open("routes.txt") as f:
             routes_df = pd.read_csv(f)
     ROUTE_ID_TO_NAME = dict(zip(routes_df["route_id"].astype(str), routes_df["route_short_name"].astype(str)))
     
-    # Stop-Route Map
+    # Stop-Route Map (기존 동일)
     try:
         with zipfile.ZipFile(gtfs_files[0]) as z:
             with z.open("trips.txt") as f:
@@ -449,7 +289,6 @@ else:
         grouped = merged.groupby("stop_id")["route_id"].apply(set)
         STOP_ROUTE_MAP = grouped.to_dict()
     except Exception as e:
-        print(f"⚠️ 매핑 실패: {e}")
         STOP_ROUTE_MAP = {}
 
     # 캐시 저장
@@ -457,10 +296,10 @@ else:
         pickle.dump({
             "stops": STOP_ID_TO_NAME,
             "routes": ROUTE_ID_TO_NAME,
-            "stop_route_map": STOP_ROUTE_MAP
+            "stop_route_map": STOP_ROUTE_MAP,
+            "coords": STOP_COORDS # [NEW] 저장
         }, f)
 
-# Helper 함수들 (기존 유지)
 def get_stop_name(stop_id):
     if pd.isna(stop_id): return None
     safe_id = str(stop_id).strip()
@@ -479,6 +318,7 @@ def get_route_name(route_id):
 # ============================================================
 # 4. 경로 계산 및 상세화 (r5py) - 안전성 보강
 # ============================================================
+
 def get_r5py_matrix(nodes, departure_time):
     valid_nodes = [n for n in nodes if n.get("lat") is not None]
     if len(valid_nodes) < 2: return {}
@@ -488,6 +328,7 @@ def get_r5py_matrix(nodes, departure_time):
         geometry=gpd.points_from_xy([n['lng'] for n in valid_nodes], [n['lat'] for n in valid_nodes]),
         crs="EPSG:4326"
     )
+
     try:
         matrix = TravelTimeMatrix(
             transport_network, origins=gdf, destinations=gdf, departure=departure_time,
@@ -502,35 +343,41 @@ def get_r5py_matrix(nodes, departure_time):
         print(f"⚠️ 행렬 계산 오류: {e}")
         return {}
 
+
 def make_cache_key(start_node, end_node, departure_time):
-    s_name = start_node.get("name", str(start_node.get("id")))
-    e_name = end_node.get("name", str(end_node.get("id")))
-    s_coord = f"{start_node.get('lat')}_{start_node.get('lng')}"
-    e_coord = f"{end_node.get('lat')}_{end_node.get('lng')}"
-    return (f"{s_name}_{s_coord}", f"{e_name}_{e_coord}", int(departure_time.hour))
+    """캐시 키 생성을 일관성 있게 관리"""
+    s_id = start_node.get("id")
+    e_id = end_node.get("id")
+    # 좌표 기반 유니크성 확보를 위해 ID와 시간대 조합
+    return (s_id, e_id, departure_time.hour)
+
 
 def get_all_detailed_paths(trip_legs, departure_time):
     if not trip_legs: return {}
     path_map = {}
     origins_list, dests_list = [], []
 
+    # 1) 요청할 (좌표 있는) 쌍만 수집하고, 좌표 없는 쌍은 폴백으로 처리
     for start_node, end_node in trip_legs:
         if start_node['id'] == end_node['id']: continue
-        
-        cache_key = make_cache_key(start_node, end_node, departure_time)
-        if cache_key in DETAILED_PATH_CACHE:
-            path_map[(int(start_node['id']), int(end_node['id']))] = DETAILED_PATH_CACHE[cache_key]
+
+        ckey = make_cache_key(start_node, end_node, departure_time)
+        if ckey in DETAILED_PATH_CACHE:
+            path_map[(start_node['id'], end_node['id'])] = DETAILED_PATH_CACHE[ckey]
             continue
 
+        # 좌표가 없으면 r5 요청을 만들지 않고 폴백으로 채움
         if start_node.get('lat') is None or end_node.get('lat') is None:
-            fallback = {"fastest": [f"이동(좌표없음) : {FALLBACK_MOVE_MIN}분"], "min_transfer": [f"이동(좌표없음) : {FALLBACK_MOVE_MIN}분"]}
-            DETAILED_PATH_CACHE[cache_key] = fallback
-            path_map[(int(start_node['id']), int(end_node['id']))] = fallback
+            fallback = {"fastest": [f"이동(좌표없음) : {FALLBACK_MOVE_MIN}분"], 
+                        "min_transfer": [f"이동(좌표없음) : {FALLBACK_MOVE_MIN}분"]}
+            path_map[(start_node['id'], end_node['id'])] = fallback
             continue
 
+        # 좌표가 모두 있으면 r5 요청 대상에 추가
         origins_list.append(start_node)
         dests_list.append(end_node)
 
+    # 2) 좌표 있는 쌍만 r5py로 상세 경로 요청
     if origins_list:
         origins_gdf = gpd.GeoDataFrame(origins_list, geometry=gpd.points_from_xy([n['lng'] for n in origins_list], [n['lat'] for n in origins_list]), crs="EPSG:4326")
         origins_gdf["id"] = [n["id"] for n in origins_list]
@@ -555,106 +402,58 @@ def get_all_detailed_paths(trip_legs, departure_time):
                     if c in row.index and pd.notna(row[c]): return str(row[c]).strip()
                 return default
 
-            # [최종 수정] 시간 중복 합산 방지를 위해 요약 로그에서 '분' 단어 제거 ('m'으로 대체)
-            def parse_route_to_segments_with_congestion(route_df, current_dt):
+            def parse_route_to_segments(route_df):
                 segs = []
-                total_weighted_min = 0
-                
-                total_ride_diff = 0
-                total_wait_diff = 0
-
                 for _, leg in route_df.iterrows():
                     raw_mode = str(leg[mode_col]).upper() if mode_col in leg.index else ''
-                    
+
+                    # 시간 파싱
                     ride_time = max(1, duration_to_minutes(get_val(leg, ['travel_time', 'duration'], 0)))
                     wait_time = duration_to_minutes(get_val(leg, ['wait_time', 'wait'], 0))
-                    
-                    f_id = str(get_val(leg, ['start_stop_id', 'from_stop_id']))
-                    f_stop_name = get_stop_name(f_id) or "정류장"
-                    
-                    f_lat, f_lng = None, None
-                    try:
-                        if 'geometry' in leg and leg['geometry']:
-                            geom = leg['geometry']
-                            if hasattr(geom, 'coords'):
-                                f_lng, f_lat = geom.coords[0]
-                    except Exception:
-                        pass
-                    
-                    t_weight, c_weight, t_emoji, c_emoji = predict_congestion_weights(
-                        f_stop_name, current_dt, lat=f_lat, lng=f_lng
-                    )
-                    
-                    final_ride_time = ride_time
-                    final_wait_time = wait_time
 
-                    is_subway = any(x in raw_mode for x in ['SUBWAY', 'RAIL', 'METRO'])
-                    is_walk = 'WALK' in raw_mode
+                    # 출발 정류장 ID (대기하는 곳)
+                    f_id = str(get_val(leg, ['start_stop_id', 'from_stop_id'])).strip()
+                    t_id = str(get_val(leg, ['end_stop_id', 'to_stop_id'])).strip()
 
-                    if is_walk:
-                        pass
+                    if wait_time > 0:
+                        # [핵심 수정] 대기 텍스트 뒤에 정류장 ID를 몰래 심어둡니다.
+                        # 예: "대기 : 5분 [STOP:1000023]"
+                        segs.append(f"대기 : {wait_time}분 [STOP:{f_id}]")
+
+                    if 'WALK' in raw_mode:
+                        segs.append(f"도보 : {ride_time}분")
+                        continue
+
+                    f_stop, t_stop = get_stop_name(f_id) or "정류장", get_stop_name(t_id) or "정류장"
+                    c_rid = str(get_val(leg, ['route_id']))
+                    mode_lbl = "지하철" if any(x in raw_mode for x in ['SUBWAY', 'RAIL', 'METRO']) else "버스"
+
+                    # ... (버스 노선명 찾는 로직 기존 동일) ...
+                    if mode_lbl == "버스" and STOP_ROUTE_MAP:
+                        common = STOP_ROUTE_MAP.get(f_id, set()).intersection(STOP_ROUTE_MAP.get(t_id, set()))
+                        common.add(c_rid)
+                        b_names = sorted([n for n in [get_route_name(rid) for rid in common] if n])
+                        r_str = ", ".join(b_names) if b_names else (get_route_name(c_rid) or '대중교통')
                     else:
-                        # 지하철이 아니면(버스) 도로 혼잡도 적용
-                        if not is_subway:
-                            base_penalty = 1 if t_emoji == '🔴' else 0
-                            final_ride_time = math.ceil(ride_time * t_weight) + base_penalty
-                        
-                        if wait_time > 0:
-                            final_wait_time = math.ceil(wait_time * c_weight)
-                        
-                        total_ride_diff += (final_ride_time - ride_time)
-                        total_wait_diff += (final_wait_time - wait_time)
-
-                    if final_wait_time > 0 and not is_walk:
-                        segs.append(f"대기 : {final_wait_time}분")
-                    elif is_walk:
-                        # 도보일 경우 대기 시간을 그냥 도보 시간에 합쳐버리는 방식
-                        final_ride_time += final_wait_time
-
-                    if is_walk:
-                        segs.append(f"도보 : {final_ride_time}분")
-                    else:
-                        t_id = str(get_val(leg, ['end_stop_id', 'to_stop_id']))
-                        t_stop = get_stop_name(t_id) or "정류장"
-                        c_rid = str(get_val(leg, ['route_id']))
-                        mode_lbl = "지하철" if is_subway else "버스"
-                        
                         r_str = get_route_name(c_rid) or '대중교통'
-                        if mode_lbl == "버스" and STOP_ROUTE_MAP:
-                            common = STOP_ROUTE_MAP.get(f_id, set()).intersection(STOP_ROUTE_MAP.get(t_id, set()))
-                            common.add(c_rid)
-                            b_names = sorted([n for n in [get_route_name(rid) for rid in common] if n])
-                            if b_names: r_str = ", ".join(b_names)
 
-                        segs.append(f"[{mode_lbl}][{r_str}] : {f_stop_name} → {t_stop} : {final_ride_time}분")
+                    segs.append(f"[{mode_lbl}][{r_str}] : {f_stop} → {t_stop} : {ride_time}분")
 
-                    total_weighted_min += (final_ride_time + final_wait_time)
-                    current_dt += timedelta(minutes=final_ride_time + final_wait_time)
-                
-                # [수정된 출력] '분' 글자를 피해 'm' 사용 (파싱 로직 회피)
-                if segs:
-                    total_delay = int(total_ride_diff + total_wait_diff)
-                    if total_delay > 0:
-                        # 예: (총 27m 소요 / 지연 +9m 포함) -> '분' 글자가 없어서 계산에 포함 안 됨
-                        summary_str = f" (총 {int(total_weighted_min)}m 소요 / 지연 +{total_delay}m 포함)"
-                    else:
-                        summary_str = f" (총 {int(total_weighted_min)}m 소요)"
-                    segs[-1] += summary_str
+                return segs
 
-                return segs, total_weighted_min
-
+            # 3) 그룹별 옵션 분석
             for (from_id, to_id), group in computer.groupby(['from_id', 'to_id']):
                 options_data = []
                 for _, opt in group.groupby("option"):
-                    raw_time = sum(max(1, duration_to_minutes(get_val(leg, ['travel_time', 'duration'], 0))) for _, leg in opt.iterrows())
+                    t_min = sum(max(1, duration_to_minutes(get_val(leg, ['travel_time', 'duration'], 0))) for _, leg in opt.iterrows())
                     t_count = sum(1 for _, leg in opt.iterrows() if 'WALK' not in str(leg[mode_col]).upper())
-                    options_data.append({"route": opt, "time": raw_time, "transfers": t_count})
+                    options_data.append({"route": opt, "time": t_min, "transfers": t_count})
 
-                if not options_data: continue
+                if not options_data:
+                    continue
 
                 fastest_opt = min(options_data, key=lambda x: (x['time'], x['transfers']))
-                segs_fast, _ = parse_route_to_segments_with_congestion(fastest_opt['route'], departure_time)
-                result_entry = {"fastest": segs_fast}
+                result_entry = {"fastest": parse_route_to_segments(fastest_opt['route'])}
 
                 walk_opts = [o for o in options_data if o['transfers'] == 0]
                 best_walk = min(walk_opts, key=lambda x: x['time']) if walk_opts else None
@@ -663,14 +462,21 @@ def get_all_detailed_paths(trip_legs, departure_time):
                 transit_opts.sort(key=lambda x: (x['transfers'], x['time']))
                 best_transit = transit_opts[0] if transit_opts else None
 
-                winner_opt = best_transit if best_transit else best_walk
-                if best_walk and best_transit and best_walk['time'] <= best_transit['time']:
+                winner_opt = None
+                if best_walk and best_transit:
+                    if best_walk['time'] <= best_transit['time']:
+                        winner_opt = best_walk
+                    else:
+                        winner_opt = best_transit
+                elif best_transit:
+                    winner_opt = best_transit
+                else:
                     winner_opt = best_walk
 
                 if winner_opt:
-                    segs_min, _ = parse_route_to_segments_with_congestion(winner_opt['route'], departure_time)
-                    result_entry["min_transfer"] = segs_min
+                    result_entry["min_transfer"] = parse_route_to_segments(winner_opt['route'])
                 else:
+                    # 드물게 옵션이 비어있으면 폴백 적용
                     result_entry["min_transfer"] = [f"도보 : {FALLBACK_MOVE_MIN}분"]
 
                 cache_key = (int(from_id), int(to_id), int(departure_time.hour))
@@ -710,11 +516,37 @@ def build_nodes(places, restaurants, fixed_events, day_start_dt):
     nodes.append({"name": "시작점", "category": "출발", "lat": first_place["lat"], "lng": first_place["lng"], "stay": 0, "type": "depot"})
 
     for p in places:
-        nodes.append({"name": p["name"], "category": p["category"], "lat": p.get("lat"), "lng": p.get("lng"), "stay": stay_time_map.get(p["category"], 60), "type": "spot"})
+        nodes.append({
+            "name": p["name"], 
+            "category": p["category"], 
+            "category2": p.get("category2", ""), # category2 추가
+            "lat": p.get("lat"), 
+            "lng": p.get("lng"), 
+            "stay": stay_time_map.get(p["category"], 60), 
+            "type": "spot"
+        })
 
-    if restaurants:
-        nodes.append({"name": restaurants[0]["name"], "category": "음식점", "lat": restaurants[0].get("lat"), "lng": restaurants[0].get("lng"), "stay": 70, "type": "lunch"})
-        nodes.append({"name": restaurants[1]["name"], "category": "음식점", "lat": restaurants[1].get("lat"), "lng": restaurants[1].get("lng"), "stay": 70, "type": "dinner"})
+    if len(restaurants) >= 2:
+        nodes.append({
+            "name": restaurants[0]["name"], 
+            "category": "음식점", 
+            "category2": restaurants[0].get("category2", "식당"), # category2 추가
+            "lat": restaurants[0].get("lat"), 
+            "lng": restaurants[0].get("lng"), 
+            "stay": 70, 
+            "type": "lunch"
+        })
+        dinner_idx = 1 if restaurants[0]["name"] != restaurants[1]["name"] else 2
+        if len(restaurants) > dinner_idx:
+            nodes.append({
+                "name": restaurants[1]["name"], 
+                "category": "음식점", 
+                "category2": restaurants[1].get("category2", "식당"), # category2 추가
+                "lat": restaurants[1].get("lat"), 
+                "lng": restaurants[1].get("lng"), 
+                "stay": 70, 
+                "type": "dinner"
+            })
 
     nodes.extend(build_fixed_nodes(fixed_events, day_start_dt))
     return nodes
@@ -737,12 +569,13 @@ def build_time_windows(nodes, day_start_dt):
 # 이후 로직은 대부분 그대로 동작한다.
 
 def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_str, end_time_str=None):
-    # (기존 로직 유지)
+    TRAVEL_BUFFER = 5
     day_start_dt = datetime.strptime(start_time_str, "%H:%M")
+    
     SAFE_GTFS_DATE = target_date_str
     r5_departure_dt = datetime.combine(datetime.strptime(SAFE_GTFS_DATE, "%Y-%m-%d"), datetime.strptime("11:00", "%H:%M").time())
     display_start_dt = datetime.combine(datetime.strptime(target_date_str, "%Y-%m-%d"), day_start_dt.time())
-    
+
     max_horizon_minutes = 24 * 60
     if end_time_str:
         diff = int((datetime.strptime(end_time_str, "%H:%M") - day_start_dt).total_seconds() / 60)
@@ -755,41 +588,43 @@ def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_
     r5_travel_times = get_r5py_matrix(nodes, r5_departure_dt)
     time_matrix = [[0]*n for _ in range(n)]
     
-    # [수정 고려] OR-Tools 매트릭스 생성 시에도 예측 가중치를 적용할 수 있으나, 
-    # N*N 호출 비용 문제로 여기서는 평균적인 보수값(1.0~1.1)만 적용하거나 기존 유지를 권장.
-    # 일단 기존 로직을 유지하되, 상세 경로(get_all_detailed_paths)에서만 정확한 보정을 수행합니다.
     for i in range(n):
         for j in range(n):
             if i == j: continue
             val = r5_travel_times.get((i, j))
             if val is None: val = travel_minutes(nodes[i], nodes[j])
             
+            # 고정일정 이동시간 보정
             if (nodes[i]["type"]=="fixed" or nodes[j]["type"]=="fixed"):
                 if not (nodes[i]["type"]=="depot" and nodes[j]["type"]=="fixed"):
                     val = max(val, 30)
             
             time_matrix[i][j] = nodes[i]["stay"] + int(val)
 
-    # (OR-Tools Solver 기존과 동일)
+    # OR-Tools Solver
     manager = pywrapcp.RoutingIndexManager(n, 1, 0)
     routing = pywrapcp.RoutingModel(manager)
 
     def time_callback(from_idx, to_idx):
         return time_matrix[manager.IndexToNode(from_idx)][manager.IndexToNode(to_idx)]
-    
+
     transit_callback = routing.RegisterTransitCallback(time_callback)
     routing.SetArcCostEvaluatorOfAllVehicles(transit_callback)
-    routing.AddDimension(transit_callback, 30, max_horizon_minutes, False, "Time")
+    routing.AddDimension(transit_callback, 480, max_horizon_minutes, False, "Time")
     time_dim = routing.GetDimensionOrDie("Time")
+
     time_windows = build_time_windows(nodes, day_start_dt)
     solver = routing.solver()
+
     for i, node in enumerate(nodes):
         index = manager.NodeToIndex(i)
         if node["type"] == "depot": continue
+        
         window = time_windows[i]
         if node["type"] == "fixed":
             time_dim.CumulVar(index).SetRange(max(0, window[0]), min(max_horizon_minutes, window[1]))
             continue
+
         overlap_start, overlap_end = max(0, window[0]), min(max_horizon_minutes, window[1])
         if overlap_start > overlap_end:
             routing.AddDisjunction([index], 0)
@@ -798,7 +633,12 @@ def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_
             time_dim.CumulVar(index).SetRange(overlap_start, overlap_end)
             penalty = 1000000 if node["type"] in ["lunch", "dinner"] else 100000
             routing.AddDisjunction([index], penalty)
+
     search_params = pywrapcp.DefaultRoutingSearchParameters()
+    # search_params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+    # search_params.time_limit.seconds = 1
+    # search_params.log_search = False
+
     solution = routing.SolveWithParameters(search_params)
     if not solution: return []
 
@@ -813,70 +653,126 @@ def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_
     trip_legs = [(visited_nodes[i], visited_nodes[i+1]) for i in range(len(visited_nodes)-1)]
     
     print("🚀 상세 경로 계산 중...")
-    # 상세 경로 계산 시 predict_congestion_weights가 내부적으로 호출됨
-    path_map = get_all_detailed_paths(trip_legs, r5_departure_dt) 
-    
-    # [타임라인 생성]
+    start_path_time = time.time()
+    path_map = get_all_detailed_paths(trip_legs, r5_departure_dt)
+    end_path_time = time.time()
+    print(f"⏱ 상세 경로 계산 완료: {round(end_path_time - start_path_time, 2)}초")
+
     def build_timeline_by_type(path_type):
         timeline = []
         actual_visits = [n for n in visited_nodes if n["type"] != "depot"]
-        cursor = display_start_dt + timedelta(minutes=actual_visits[0]['arrival_min'])
+        
+        cursor_dt = display_start_dt + timedelta(minutes=actual_visits[0]['arrival_min'])
 
         for i, node in enumerate(actual_visits):
             transit_info = []
             travel_min = 0
             
+            # --- [이동 및 대중교통 혼잡도 반영] ---
             if i > 0:
                 prev = actual_visits[i-1]
                 path_options = path_map.get((prev['id'], node['id']))
-                
                 if path_options:
                     chosen_path = path_options.get(path_type, path_options.get('fastest', []))
-                    transit_info = chosen_path
-                    # 파싱된 문자열에서 분 추출하여 합산 (이미 가중치 반영된 시간임)
+                    
                     for segment in chosen_path:
-                        mins = re.findall(r'(\d+)분', segment)
-                        for m in mins: travel_min += int(m)
-                else:
-                    # Fallback 시에도 간단히 가중치 적용 가능
-                    t_w, _ = predict_congestion_weights(prev['name'], cursor)
-                    if prev.get('lat') is None or node.get('lat') is None:
-                        base_min = FALLBACK_MOVE_MIN
-                        travel_min = int(base_min * t_w)
-                        transit_info = [f"이동(좌표없음) : {travel_min}분"]
-                    else:
-                        dist = haversine(prev['lat'], prev['lng'], node['lat'], node['lng'])
-                        base_min = int(dist * 15)
-                        travel_min = int(base_min * t_w)
-                        transit_info = [f"도보/이동 : {travel_min}분"]
-            
-            # [핵심 추가] 각 방문 장소(Spot) 도착 시점의 혼잡도 예측
-            _, _, t_stat, c_stat = predict_congestion_weights(
-                node["name"], 
-                cursor, 
-                lat=node.get("lat"), 
-                lng=node.get("lng")
-            )
-            congestion_info = f"Traffic:{t_stat}, Crowd:{c_stat}"
+                        # 1. 소요 시간 파싱
+                        seg_mins = sum(int(m) for m in re.findall(r'(\d+)분', segment))
+                        
+                        # 2. '대기' 구간일 경우 정류장 혼잡도 표시 및 시간 가중치 적용
+                        if "대기" in segment:
+                            target_lat, target_lng = None, None
+                            
+                            # (A) 정류장 ID 찾기 & 좌표 조회
+                            stop_match = re.search(r'\[STOP:(.*?)\]', segment)
+                            if stop_match:
+                                s_id = stop_match.group(1).strip()
+                                if s_id in STOP_COORDS:
+                                    target_lat = STOP_COORDS[s_id]['lat']
+                                    target_lng = STOP_COORDS[s_id]['lng']
+                            
+                            # (B) 좌표 폴백
+                            if target_lat is None:
+                                target_lat = prev.get('lat')
+                                target_lng = prev.get('lng')
 
+                            # (C) 혼잡도 계산
+                            cong_level = get_congestion_level(target_lat, target_lng, cursor_dt)
+                            
+                            # [핵심 변경] 대기 시간 전용 가중치 함수 사용 (1.0 / 1.5 / 2.0)
+                            weight = get_wait_weight(cong_level)
+                            
+                            weighted_wait = int(seg_mins * weight)
+                            added_wait = weighted_wait - seg_mins
+                            
+                            # (D) 혼잡도 아이콘 결정
+                            icons = {0: "🟢", 1: "🟡", 2: "🔴"}
+                            cong_icon = icons.get(cong_level, "")
+
+                            # (E) 텍스트 재구성
+                            clean_segment = re.sub(r'\s*\[STOP:.*?\]', '', segment) 
+                            
+                            # 기본 텍스트 + 아이콘
+                            clean_segment += f" {cong_icon}"
+                            
+                            # 시간이 늘어났을 때만 추가 시간 표시
+                            if added_wait > 0:
+                                seg_mins = weighted_wait
+                                clean_segment += f"(+{added_wait}분)"
+                            
+                            segment = clean_segment
+                                
+                        transit_info.append(segment)
+                        travel_min += seg_mins
+                else:
+                    dist = haversine(prev['lat'], prev['lng'], node['lat'], node['lng']) if prev.get('lat') else 0
+                    travel_min = int(dist * 15) if dist > 0 else FALLBACK_MOVE_MIN
+                    transit_info.append(f"도보 : {travel_min}분")
+
+            # --- [도착 시간 계산] ---
+            arrival_dt = cursor_dt + timedelta(minutes=travel_min)
+            
+            if node["type"] in ["lunch", "dinner"]:
+                window_start_min, _ = build_time_windows([node], display_start_dt)[0]
+                window_start_dt = display_start_dt + timedelta(minutes=window_start_min)
+                earliest_start_dt = window_start_dt - timedelta(minutes=20)
+                if arrival_dt < earliest_start_dt:
+                    wait_min = int((window_start_dt - arrival_dt).total_seconds() / 60)
+                    transit_info.append(f"현장 대기 : {wait_min}분")
+                    arrival_dt = window_start_dt
+
+            # --- [장소 체류 시간 혼잡도 반영] ---
+            final_stay_min = node["stay"]
+            congestion_label = "여유"
+            
+            if node["type"] not in ["fixed", "lunch", "dinner"]:
+                cong_level = get_congestion_level(node.get('lat'), node.get('lng'), arrival_dt)
+                
+                # [참고] 체류 시간은 기존 가중치 유지 (1.0 / 1.1 / 1.3)
+                weight = get_stay_weight(cong_level)
+                
+                final_stay_min = int(node["stay"] * weight)
+                
+                labels = {0: "🟢여유", 1: "🟡보통", 2: "🔴혼잡"}
+                congestion_label = labels.get(cong_level, "정보없음")
+
+            # --- [종료 시간 업데이트] ---
             if node["type"] == "fixed":
-                time_parts = node.get("orig_time_str", "00:00 - 00:00").split(" - ")
-                start_dt = datetime.strptime(f"{target_date_str} {time_parts[0]}", "%Y-%m-%d %H:%M")
-                end_dt = datetime.strptime(f"{target_date_str} {time_parts[1]}", "%Y-%m-%d %H:%M")
-                cursor = end_dt
-                time_str = node["orig_time_str"]
+                time_str = node.get("orig_time_str", "00:00 - 00:00")
+                time_parts = time_str.split(" - ")
+                cursor_dt = datetime.strptime(f"{target_date_str} {time_parts[1]}", "%Y-%m-%d %H:%M")
             else:
-                start_dt = cursor + timedelta(minutes=travel_min)
-                end_dt = start_dt + timedelta(minutes=node["stay"])
-                time_str = f"{start_dt.strftime('%H:%M')} - {end_dt.strftime('%H:%M')}"
-                cursor = end_dt
+                end_dt = arrival_dt + timedelta(minutes=final_stay_min)
+                time_str = f"{arrival_dt.strftime('%H:%M')} - {end_dt.strftime('%H:%M')}"
+                cursor_dt = end_dt
 
             timeline.append({
-                "name": node["name"],
+                "name": node['name'], 
                 "category": node["category"],
+                "category2": node.get("category2", node["category"]),
                 "time": time_str,
                 "transit_to_here": transit_info,
-                "congestion": congestion_info
+                "congestion_level": congestion_label
             })
         return timeline
 
@@ -892,39 +788,10 @@ if __name__ == "__main__":
     # 1. 엑셀 및 기본 정보 로드
     print("📂 장소 데이터 로드 중...")
     try:
-        df = pd.read_excel("./data/place_전체_통합.xlsx")
-        df.columns = ["category", "name", "place_id", "area", "lat", "lng"]
+        df = pd.read_excel("./data/place_전체_통합_진짜최종.xlsx")
     except FileNotFoundError:
         print("❌ 'places_전체_통합.xlsx' 파일이 없습니다.")
         exit()
-
-    SEOUL_GU_COORDS = {
-    "강남구": {"lat": 37.514575, "lon": 127.0495556},
-    "강동구": {"lat": 37.52736667, "lon": 127.1258639},
-    "강북구": {"lat": 37.63695556, "lon": 127.0277194},
-    "강서구": {"lat": 37.54815556, "lon": 126.851675},
-    "관악구": {"lat": 37.47538611, "lon": 126.9538444},
-    "광진구": {"lat": 37.53573889, "lon": 127.0845333},
-    "구로구": {"lat": 37.49265, "lon": 126.8895972},
-    "금천구": {"lat": 37.44910833, "lon": 126.9041972},
-    "노원구": {"lat": 37.65146111, "lon": 127.0583889},
-    "도봉구": {"lat": 37.66583333, "lon": 127.0495222},
-    "동대문구": {"lat": 37.571625, "lon": 127.0421417},
-    "동작구": {"lat": 37.50965556, "lon": 126.941575},
-    "마포구": {"lat": 37.56070556, "lon": 126.9105306},
-    "서대문구": {"lat": 37.57636667, "lon": 126.9388972},
-    "서초구": {"lat": 37.48078611, "lon": 127.0348111},
-    "성동구": {"lat": 37.56061111, "lon": 127.039},
-    "성북구": {"lat": 37.58638333, "lon": 127.0203333},
-    "송파구": {"lat": 37.51175556, "lon": 127.1079306},
-    "양천구": {"lat": 37.51423056, "lon": 126.8687083},
-    "영등포구": {"lat": 37.52361111, "lon": 126.8983417},
-    "용산구": {"lat": 37.53609444, "lon": 126.9675222},
-    "은평구": {"lat": 37.59996944, "lon": 126.9312417},
-    "종로구": {"lat": 37.57037778, "lon": 126.9816417},
-    "중구": {"lat": 37.56100278, "lon": 126.9996417},
-    "중랑구": {"lat": 37.60380556, "lon": 127.0947778},
-    }
 
     area = input("여행할 지역을 입력하세요 (예: 종로구): ")
 
@@ -940,14 +807,19 @@ if __name__ == "__main__":
     # 2. 장소 필터링
     area_mask = df[df["distance_km"] <= RADIUS_KM].copy()
     print(f"\n📍 {area} 중심 반경 {RADIUS_KM}km 이내 장소 수: {len(area_mask)}")
-    
+
     dist_mask = df["distance_km"] <= RADIUS_KM
 
-    filtered_spot = df[dist_mask & (df["category"] != "음식점") & (df["category"] != "숙박")][["name", "lat", "lng"]]
+    filtered_spot = df[dist_mask & (df["category"] != "음식점") & (df["category"] != "숙박")][["name", "lat", "lng", "category", "category2"]]
 
-    filtered_restaurant = df[dist_mask & (df["category"] == "음식점")][["name", "lat", "lng"]]
+    avg_lat = filtered_spot["lat"].mean()
+    avg_lng = filtered_spot["lng"].mean()
 
-    filtered_accom = df[dist_mask & (df["category"] == "숙박")][["name", "lat", "lng"]]
+    # 관광지 중심 1.5km 이내 식당만 추출 (훨씬 타이트한 동선)
+    df["dist_to_center"] = df.apply(lambda r: haversine(avg_lat, avg_lng, r["lat"], r["lng"]), axis=1)
+    filtered_restaurant = df[(df["dist_to_center"] <= 3) & (df["category"] == "음식점")][["name", "lat", "lng", "category", "category2"]]
+
+    filtered_accom = df[dist_mask & (df["category"] == "숙박")][["name", "lat", "lng", "category", "category2"]]
 
     places = filtered_spot.to_dict(orient="records")
     print(len(places), "개의 관광지가 선택되었습니다.")
@@ -973,13 +845,13 @@ if __name__ == "__main__":
     #   "plans": {
     #     "day1": {
     #       "route": [
-    #         {"name": "...", "category": "...", "lat": 0.0, "lng": 0.0}
+    #         {"name": "...", "category": "...", "category2": "...", "lat": 0.0, "lng": 0.0}
     #       ],
     #       "restaurants": [
-    #         {"name": "...", "category": "음식점", "lat": 0.0, "lng": 0.0}
+    #         {"name": "...", "category": "...", "category2": "...", "lat": 0.0, "lng": 0.0}
     #       ],
     #       "accommodations": [
-    #         {"name": "...", "category": "숙박", "lat": 0.0, "lng": 0.0}
+    #         {"name": "...", "category": "...", "category2": "...", "lat": 0.0, "lng": 0.0}
     #       ]
     #     }
     #   }
@@ -990,7 +862,7 @@ if __name__ == "__main__":
     # 너는 '서울 여행 장소 추천 전문가'이다. 반드시 제공된 데이터만을 사용하여 계획을 세운다.
     # {schema}
     # [절대 규칙]
-    # 1. 모든 장소의 이름, 카테고리, 좌표(lat, lng)는 입력된 데이터와 100% 일치해야 한다. 절대 값을 수정하거나 새로운 좌표를 생성하지 마라.
+    # 1. 모든 장소의 이름, 좌표(lat, lng), 카테고리는 입력된 데이터와 100% 일치해야 한다. 절대 값을 수정하거나 새로운 좌표를 생성하지 마라.
     # 2. 'route' 배열: 오직 제공된 'places' 목록에서 5개를 선택하여 담는다.
     # 3. 'restaurants' 배열: 오직 제공된 'restaurants' 목록에서 2개를 선택한다.
     # 4. 'accommodations' 배열: 오직 제공된 'accommodations' 목록에서 1개를 선택한다. (마지막 날은 빈 배열 []로 출력)
@@ -1010,7 +882,7 @@ if __name__ == "__main__":
     # prompt = system_prompt + "\n\n" + json.dumps(user_prompt, ensure_ascii=False)
     
     # start_time = time.time()
-    # response = client.models.generate_content(model="gemini-2.5-flash-lite", contents=prompt)
+    # response = client.models.generate_content(model="gemini-2.5-flash-lite", contents=prompt, config={"temperature": 0})
     # print(f"⏱ Gemini 응답 시간: {round(time.time() - start_time, 3)}초")
 
     # try:
@@ -1048,7 +920,7 @@ if __name__ == "__main__":
     print(f"\n🚀 병렬 최적화 시작: {len(day_keys)}일치 일정을 동시에 계산합니다.")
     start_total_opt = time.time()
 
-    # [내부 함수] 병렬 처리를 위한 래퍼 함수
+    # 6-1. 병렬 실행 인자(Task) 준비
     def process_day_wrapper(args):
         day_key, date_obj, is_first, is_last = args
         
@@ -1069,7 +941,6 @@ if __name__ == "__main__":
         )
         return day_key, day_res
 
-    # 6-1. 병렬 실행 인자(Task) 준비
     tasks = []
     curr = start
     for i, day_key in enumerate(day_keys):
@@ -1078,16 +949,13 @@ if __name__ == "__main__":
 
     # 6-2. ThreadPoolExecutor로 병렬 실행
     processed_results = {}
-    
-    if available_cores >= days * 2:
-        available_cores = days * 2
-    else:
-        available_cores = available_cores - 2
 
-    print(f"⚙️ 최대 {available_cores}개 코어로 병렬 처리 중...")
+    max_workers = min(days, 4)
+    print(f"⚙️ 최대 {max_workers}개 코어로 병렬 처리 중...")
 
-    with ThreadPoolExecutor(max_workers=available_cores) as executor:
-        for day_key, day_res in executor.map(process_day_wrapper, tasks):
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        results = list(executor.map(process_day_wrapper, tasks))
+        for day_key, day_res in results:
             processed_results[day_key] = day_res
             print(f"   ✅ {day_key} 완료")
 
@@ -1112,11 +980,16 @@ if __name__ == "__main__":
 
             for t in timeline:
                 if t.get('transit_to_here'):
-                    # 리스트 형태의 경로를 화살표로 연결하여 출력
                     path_str = " -> ".join([s for s in t['transit_to_here']])
                     print(f"  [TRANSIT] {path_str}")
-                congestion_log = t.get('congestion', 'N/A')
-                print(f"  [{t['time']}] {t['name']} ({t['category']}) - {congestion_log}")
+                
+                # category 대신 category2 출력
+                display_cat = t.get('category2', t['category'])
+                
+                # [수정된 출력 포맷]
+                # 기존: [{t['time']}] {t['name']} ({display_cat})
+                # 변경: [{t['time']}] {t['name']} ({display_cat}) {t['congestion_level']}
+                print(f"  [{t['time']}] {t['name']} ({display_cat}) {t['congestion_level']}")
             
             print(separator)
 
@@ -1124,6 +997,6 @@ if __name__ == "__main__":
         curr += timedelta(days=1)
 
     # 7. 모든 루프가 끝난 후 최종 파일 저장 (루프 외부)
-    with open("result_timeline_congestion.json", "w", encoding="utf-8") as f:
+    with open("result_timeline.json", "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
-        print("\n전체 일정이 'result_timeline_congestion.json' 파일로 저장되었습니다.")
+        print("\n전체 일정이 'result_timeline.json' 파일로 저장되었습니다.")
