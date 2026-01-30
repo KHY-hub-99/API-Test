@@ -662,13 +662,16 @@ def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_
         timeline = []
         actual_visits = [n for n in visited_nodes if n["type"] != "depot"]
         
+        # 첫 번째 장소 도착 시간 기준
         cursor_dt = display_start_dt + timedelta(minutes=actual_visits[0]['arrival_min'])
 
         for i, node in enumerate(actual_visits):
             transit_info = []
             travel_min = 0
             
-            # --- [이동 및 대중교통 혼잡도 반영] ---
+            # ============================================================
+            # 1. 이동 경로 및 대기 시간 계산 (정류장 혼잡도 반영)
+            # ============================================================
             if i > 0:
                 prev = actual_visits[i-1]
                 path_options = path_map.get((prev['id'], node['id']))
@@ -676,14 +679,11 @@ def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_
                     chosen_path = path_options.get(path_type, path_options.get('fastest', []))
                     
                     for segment in chosen_path:
-                        # 1. 소요 시간 파싱
                         seg_mins = sum(int(m) for m in re.findall(r'(\d+)분', segment))
                         
-                        # 2. '대기' 구간일 경우 정류장 혼잡도 표시 및 시간 가중치 적용
                         if "대기" in segment:
                             target_lat, target_lng = None, None
                             
-                            # (A) 정류장 ID 찾기 & 좌표 조회
                             stop_match = re.search(r'\[STOP:(.*?)\]', segment)
                             if stop_match:
                                 s_id = stop_match.group(1).strip()
@@ -691,31 +691,22 @@ def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_
                                     target_lat = STOP_COORDS[s_id]['lat']
                                     target_lng = STOP_COORDS[s_id]['lng']
                             
-                            # (B) 좌표 폴백
                             if target_lat is None:
                                 target_lat = prev.get('lat')
                                 target_lng = prev.get('lng')
 
-                            # (C) 혼잡도 계산
                             cong_level = get_congestion_level(target_lat, target_lng, cursor_dt)
-                            
-                            # [핵심 변경] 대기 시간 전용 가중치 함수 사용 (1.0 / 1.5 / 2.0)
-                            weight = get_wait_weight(cong_level)
+                            weight = get_wait_weight(cong_level) # 대기 시간 가중치 사용
                             
                             weighted_wait = int(seg_mins * weight)
                             added_wait = weighted_wait - seg_mins
                             
-                            # (D) 혼잡도 아이콘 결정
                             icons = {0: "🟢", 1: "🟡", 2: "🔴"}
                             cong_icon = icons.get(cong_level, "")
 
-                            # (E) 텍스트 재구성
                             clean_segment = re.sub(r'\s*\[STOP:.*?\]', '', segment) 
-                            
-                            # 기본 텍스트 + 아이콘
                             clean_segment += f" {cong_icon}"
                             
-                            # 시간이 늘어났을 때만 추가 시간 표시
                             if added_wait > 0:
                                 seg_mins = weighted_wait
                                 clean_segment += f"(+{added_wait}분)"
@@ -729,43 +720,67 @@ def optimize_day(places, restaurants, fixed_events, start_time_str, target_date_
                     travel_min = int(dist * 15) if dist > 0 else FALLBACK_MOVE_MIN
                     transit_info.append(f"도보 : {travel_min}분")
 
-            # --- [도착 시간 계산] ---
+            # ============================================================
+            # 2. 도착 시간 확정 (이동 시간 반영)
+            # ============================================================
             arrival_dt = cursor_dt + timedelta(minutes=travel_min)
             
+            # 식사 시간 윈도우 체크 (너무 일찍 도착하면 대기)
             if node["type"] in ["lunch", "dinner"]:
                 window_start_min, _ = build_time_windows([node], display_start_dt)[0]
                 window_start_dt = display_start_dt + timedelta(minutes=window_start_min)
-                earliest_start_dt = window_start_dt - timedelta(minutes=20)
+                earliest_start_dt = window_start_dt - timedelta(minutes=20) # 20분 전까진 허용
+                
                 if arrival_dt < earliest_start_dt:
                     wait_min = int((window_start_dt - arrival_dt).total_seconds() / 60)
                     transit_info.append(f"현장 대기 : {wait_min}분")
                     arrival_dt = window_start_dt
 
-            # --- [장소 체류 시간 혼잡도 반영] ---
+            # ============================================================
+            # 3. [핵심] 체류 시간 계산 (혼잡도 가중치 적용)
+            # ============================================================
             final_stay_min = node["stay"]
-            congestion_label = "여유"
+            congestion_label = ""
             
-            if node["type"] not in ["fixed", "lunch", "dinner"]:
+            # (A) 고정 일정 및 출발지가 아닌 경우 혼잡도 계산
+            if node["type"] not in ["fixed", "depot"]:
                 cong_level = get_congestion_level(node.get('lat'), node.get('lng'), arrival_dt)
-                
-                # [참고] 체류 시간은 기존 가중치 유지 (1.0 / 1.1 / 1.3)
-                weight = get_stay_weight(cong_level)
-                
-                final_stay_min = int(node["stay"] * weight)
                 
                 labels = {0: "🟢여유", 1: "🟡보통", 2: "🔴혼잡"}
                 congestion_label = labels.get(cong_level, "정보없음")
+                
+                # (B) 모든 장소는 체류 시간 늘리기
+                weight = get_stay_weight(cong_level) # 체류 시간 가중치 사용
+                
+                original_stay = node["stay"]
+                final_stay_min = int(original_stay * weight)
+                
+                # 시간이 늘어났으면 로그(디버깅용) 혹은 결과에 표시할 수도 있음
+                if final_stay_min > original_stay:
+                    # 예: "🔴혼잡(+18분)" 처럼 표시하고 싶다면 아래 주석 해제
+                    # congestion_label += f"(+{final_stay_min - original_stay}분)"
+                    pass
 
-            # --- [종료 시간 업데이트] ---
+            elif node["type"] == "fixed":
+                congestion_label = "📅고정"
+
+            # ============================================================
+            # 4. 종료 시간 계산 및 커서 업데이트
+            # ============================================================
             if node["type"] == "fixed":
                 time_str = node.get("orig_time_str", "00:00 - 00:00")
                 time_parts = time_str.split(" - ")
+                # 고정 일정은 정해진 시간에 끝나므로 커서를 강제로 맞춤
                 cursor_dt = datetime.strptime(f"{target_date_str} {time_parts[1]}", "%Y-%m-%d %H:%M")
             else:
+                # 일반 장소는 늘어난 체류시간(final_stay_min)만큼 머물고 출발
                 end_dt = arrival_dt + timedelta(minutes=final_stay_min)
                 time_str = f"{arrival_dt.strftime('%H:%M')} - {end_dt.strftime('%H:%M')}"
                 cursor_dt = end_dt
 
+            # ============================================================
+            # 5. 결과 저장
+            # ============================================================
             timeline.append({
                 "name": node['name'], 
                 "category": node["category"],
